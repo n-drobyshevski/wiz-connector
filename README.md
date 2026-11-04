@@ -9,11 +9,12 @@ agent mode) or assign the issue to the Copilot cloud agent.
 ```
  schedule (every 6h)
    │
-   ├─ steps (runner, deterministic) ── mvn dependency:tree -DoutputType=json ─► wizconnector deps
-   │                                     direct-deps.json  (direct deps + exact edit location)
+   ├─ steps (runner, deterministic) ── scripts/resolve-deps.sh: mvn dependency:tree -DoutputType=json
+   │                                     → direct-deps.txt (scopes the agent's Wiz queries)
    ├─ agent (Copilot, read-only, firewalled) ── Wiz MCP discover/execute ─► findings.json
    │                                     list_code_repositories → list_findings / list_vulnerability_findings
    └─ safe-output job publish-wiz-report (issues: write, deterministic)
+                                         resolve-deps.sh again on the same commit (trusted inventory)
                                          wizconnector report  → join, validate, pick target versions
                                          wizconnector publish → create / update / close ONE issue
 ```
@@ -43,8 +44,12 @@ git diff --stat ; mvn -B -ntp verify ; mvn ... maven-dependency-plugin:3.11.0:tr
 - **Direct only.** A finding is kept when its package is a depth-1 dependency of any reactor
   module (sibling modules excluded) *and* a fixed version exists. Transitive findings are counted
   under *Not included*.
-- **Target version** = the smallest listed fix that fixes *every* CVE of that dependency,
-  respecting per-release-line fixes (`2.12.7.1` vs `2.13.4.2`), preferring non-pre-releases.
+- **Target version** = the smallest listed fix that fixes *every* CVE of that dependency in
+  *every* module, respecting per-release-line fixes (`2.12.7.1` vs `2.13.4.2`), never below a
+  version another module already uses, keeping the artifact flavour (`-jre` stays `-jre`), and
+  preferring non-pre-releases.
+- **Shared properties** (e.g. `jackson.version` for several Jackson artifacts) are flagged: the
+  target must exist for every artifact using the property.
 - **Edit location** is resolved from the POMs: literal `<version>`, `${property}` (and where it is
   defined), `dependencyManagement`, or "managed outside the repo" (BOM / external parent).
 - **Stale data** (current tree already at a fixed version) is dropped.
@@ -79,8 +84,9 @@ git add .github/workflows/wiz-maven-vulns.md .github/workflows/wiz-maven-vulns.l
 git commit -m "Add Wiz direct-dependency tracker" && git push
 gh aw run wiz-maven-vulns          # first run: Actions › Run workflow with staged=true (dry run)
 ```
-Each run checks out this repository at `ref: v1` for the scripts. If this repository is private,
-give both `actions/checkout` steps a `token:` that can read it (e.g. `${{ secrets.WIZ_CONNECTOR_TOKEN }}`).
+Each run checks out this repository at `ref: v1` for the scripts (frontmatter `checkout:` and
+the publish job). Pin a commit SHA instead of the tag for stricter supply-chain control. If this
+repository is private, add a `github-token:` / `token:` that can read it to both checkouts.
 
 ### 4. Copilot files
 Copy [`copilot/`](copilot) into the target repository:
@@ -103,33 +109,44 @@ server from *MCP: List Servers* and sign in there.
 | What | Where |
 |---|---|
 | Interval | `on.schedule: every 6h` (`daily`, `every 12h`, or cron); recompile after frontmatter edits |
-| Maven project directory | `MAVEN_DIR` in the *Resolve direct Maven dependencies* step |
+| Maven project directory | top-level `env: MAVEN_DIR` (relative to the repository root; fix commands then start with `cd <dir>`) |
 | Model | `engine.model` and `safe-outputs.threat-detection.engine.model` |
 | Issue label | `--label wiz-sca` on `wizconnector publish` |
 | Cloud-agent flow | `publish --on-change replace --assignee @copilot` and a `COPILOT_ASSIGN_TOKEN` secret (user PAT; `GITHUB_TOKEN` cannot assign Copilot) passed as env to the publish step. `replace` closes the old issue and opens a new one when findings change, because the cloud agent ignores edits made after assignment |
 | Keep the issue open when clean | `publish --keep-open` |
+| Issues created by a custom token | `publish --trusted-author <login>` (default: the GitHub Actions bot) |
 
 ### Keeping Anthropic models out
-Claude models are not used anywhere, and this is enforced, not assumed:
-`engine.model` is pinned (the default `auto` lets the Copilot gateway choose any model),
-`models.allowed: ["gpt-*"]` is enforced by the gh-aw firewall, and the threat-detection job (which
-would otherwise try a small Claude model first) is pinned too. Also: set the org-wide Copilot model
-policy, avoid `.github/agents/*.agent.md` files naming Claude models, and confirm with
-`gh aw audit <run-url> --models`.
+No Claude model is configured anywhere:
+- `engine.model` is pinned (the default `auto` lets the Copilot gateway choose any model, Claude included);
+- `models.allowed: ["gpt-*"]` is enforced by the agent job's API proxy;
+- the threat-detection job (whose default alias tries a small Claude model first) is pinned to the
+  same GPT model; with the Copilot provider an unavailable model fails the run instead of being
+  substituted. The `models.allowed` policy itself is not applied to the detection job; to enforce
+  it there too, compile with `GHAW_POLICY_MODELS_ALLOWED='gpt-*'`.
+Also set the org-wide Copilot model policy (it covers Copilot in VS Code too), avoid
+`.github/agents/*.agent.md` files naming Claude models, and check runs with `gh aw audit <run-url> --models`.
 
 ## Safety model
 - The agent job is read-only and firewalled; only the `publish-wiz-report` job has `issues: write`.
-- The publish job bypasses gh-aw's sanitizer, so the Python validates every Wiz value: CVE/GHSA ids,
-  Maven coordinates and versions must match strict patterns, URLs must be `https://*.wiz.io/…`, and no
-  free text (descriptions, titles) is copied into the issue. Malformed records are dropped and counted.
-- A Wiz outage never closes the issue: the agent reports missing data instead of calling the publish
-  tool, and `report` exits non-zero if the findings contain `error`.
+- The agent can write `/tmp/gh-aw/agent/`, so the publish job takes only `findings.json` from it and
+  rebuilds the dependency inventory itself from the same commit.
+- The publish job bypasses gh-aw's sanitizer, so the Python validates every value: CVE/GHSA ids,
+  Maven coordinates, versions, property names and paths must match strict patterns (anything else
+  becomes "edit by hand", never a command), URLs must be `https://*.wiz.io/…`, and no free text
+  (descriptions, titles) is copied into the issue. Malformed records are dropped and counted.
+- Fail closed: the issue is closed only when Wiz answered (`wiz_scope` names the repository) and
+  nothing actionable is left. An `error`, a missing `findings` key or all-malformed records fail the job.
+- Only issues opened by the bot whose first line is the exact marker are updated or closed; an
+  edited body is restored on the next run. The Copilot skill applies the same author/marker check
+  before running any command.
 - Wiz credentials live only in `mcp-servers.wiz.headers` (never in `env:`).
 
 ## Local development
 ```bash
 python -m unittest discover -s tests -v
 mvn -B -ntp org.apache.maven.plugins:maven-dependency-plugin:3.11.0:tree -DoutputType=json -DappendOutput=true -DoutputFile=/tmp/tree.json
+bash scripts/resolve-deps.sh /tmp/wiz        # or the three steps by hand:
 python -m wizconnector deps   --tree /tmp/tree.json --repo-root . --out /tmp/direct-deps.json
 python -m wizconnector report --deps /tmp/direct-deps.json --findings findings.json --out-dir /tmp/out
 python -m wizconnector publish --repo owner/name --out-dir /tmp/out --dry-run
@@ -143,5 +160,9 @@ The findings format is [schemas/wiz-findings.schema.json](schemas/wiz-findings.s
   Gateway mode, so the agent discovers them at runtime. Check the first runs with `gh aw logs`.
 - The frontmatter is validated against gh-aw v1.0.1's JSON schema in CI; `gh aw compile --strict` in
   the target repository is still the authoritative check.
-- The `findings_json` fallback input is limited to 10 KB on gh-aw v1.0.1 (normal path is the file).
+- The `findings_json_b64` fallback input is limited to 10 KB on gh-aw v1.0.1 (normal path is the file).
+- The publish job runs Maven a second time (about a minute with the Maven cache): the price of not
+  trusting agent-writable files.
+- `--on-change replace` with `@copilot` assignment starts a new cloud-agent session whenever the
+  findings change; close or merge the previous Copilot PR to avoid duplicates.
 - Release this repository with a `v1` tag (the workflow pins `ref: v1`).

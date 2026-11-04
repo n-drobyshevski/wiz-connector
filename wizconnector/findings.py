@@ -36,10 +36,9 @@ def parse_package(raw: str) -> tuple[str | None, str]:
 def split_versions(raw) -> list[str]:
     if raw is None:
         return []
-    if isinstance(raw, (list, tuple)):
-        items = [str(x) for x in raw]
-    else:
-        items = re.split(r"[,;|\s]+", str(raw))
+    # Wiz's fixedVersion is a comma-separated string; agents may also wrap it in a list
+    items = [p for x in (raw if isinstance(raw, (list, tuple)) else [raw])
+             for p in re.split(r"[,;|\s]+", str(x))]
     out = []
     for it in items:
         it = it.strip().strip("[]()").lstrip("=>v ").strip()
@@ -85,8 +84,10 @@ def normalise(raw: dict) -> Finding | None:
     if not isinstance(raw, dict):
         return None
     pkg = _first(raw, "package", "detailedName", "packageName", "component", "library", default="")
-    cve = str(_first(raw, "cve", "id", "name", "vulnerability", "externalId", default="")).strip()
-    if not pkg or not _CVE.match(cve):
+    # Wiz nodes carry a UUID in `id` and the CVE in `name`: take the first key that IS a CVE/GHSA id
+    cve = next((str(raw[k]).strip() for k in ("cve", "name", "id", "vulnerability", "externalId", "vulnerabilityExternalId")
+                if raw.get(k) and _CVE.match(str(raw[k]).strip())), "")
+    if not pkg or not cve:
         return None
     group, artifact = parse_package(str(pkg))
     if raw.get("group") and not group:
@@ -106,8 +107,10 @@ def normalise(raw: dict) -> Finding | None:
         cvss = None
     url = _first(raw, "url", "link", "portalUrl")
     url = url if isinstance(url, str) and _URL.match(url) else None
-    fixed = [v for v in split_versions(_first(raw, "fixed_versions", "fixedVersion", "fixedVersions", "fix"))
-             if _VERSION.match(v)]
+    fix_raw = _first(raw, "fixed_versions", "fixedVersion", "fixedVersions", "fix")
+    fixed = [v for v in split_versions(fix_raw) if _VERSION.match(v)]
+    if fix_raw not in (None, "", []) and not fixed:
+        return None   # a fix was reported but is unreadable: never downgrade it to "no fix"
     return Finding(
         cve=cve.upper() if cve.upper().startswith("CVE-") else cve,
         group=group,
@@ -134,6 +137,8 @@ class Upgrade:
     scopes: list[str] = field(default_factory=list)
     declarations: list[dict] = field(default_factory=list)
     also_transitive_in: list[str] = field(default_factory=list)
+    module_versions: dict[str, str] = field(default_factory=dict)   # module GA -> resolved version
+    shared_with: list[str] = field(default_factory=list)            # other direct GAs using the same property
 
     @property
     def max_severity(self) -> str:
@@ -175,6 +180,7 @@ class Result:
     unmatched: dict[str, list[str]]             # packages not in the Maven tree at all
     total_findings: int
     rejected: int = 0                           # malformed records dropped by validation
+    maven_dir: str = "."
 
 
 def _match_direct(f: Finding, inv: Inventory) -> str | None:
@@ -226,20 +232,39 @@ def evaluate(raw_findings: list[dict], inv: Inventory) -> Result:
         else:
             unmatched.setdefault(f.ga or f.artifact, set()).add(f.cve)
 
+    # which direct dependencies share each version property (e.g. jackson.version)
+    prop_users: dict[str, set[str]] = {}
+    for d in inv.direct.values():
+        for decl in d.declarations:
+            if decl.get("kind") in ("property", "external-property") and decl.get("property"):
+                prop_users.setdefault(decl["property"], set()).add(d.ga)
+
     upgrades, no_fix, already = [], [], {}
     for g, cves in by_direct.items():
         d = inv.direct[g]
-        current = d.version
+        # modules can resolve different versions: judge every one, never just the first module's
+        versions = sorted(set(d.module_versions.values()) | {d.version}, key=mv.sort_key)
+        highest = versions[-1]
         fixable = [f for f in cves.values() if f.fixed_versions]
         unfixed = [f for f in cves.values() if not f.fixed_versions]
-        still_open = [f for f in fixable if not mv.fixes(current, f.fixed_versions)]
-        stale = [f.cve for f in fixable if mv.fixes(current, f.fixed_versions)]
+        still_open = [f for f in fixable if not all(mv.fixes(v, f.fixed_versions) for v in versions)]
+        stale = [f.cve for f in fixable if f not in still_open]
         if stale:
             already[g] = sorted(stale)
+        vulnerable = [v for v in versions if not all(mv.fixes(v, f.fixed_versions) for f in still_open)]
+        current = vulnerable[0] if vulnerable else d.version
+        shared = sorted({u for decl in d.declarations if decl.get("property")
+                         for u in prop_users.get(decl["property"], ())} - {g})
         base = dict(ga=g, current=current, modules=sorted(d.modules), scopes=sorted(d.scopes),
-                    declarations=d.declarations, also_transitive_in=sorted(d.also_transitive_in))
+                    declarations=d.declarations, also_transitive_in=sorted(d.also_transitive_in),
+                    module_versions=dict(sorted(d.module_versions.items())), shared_with=shared)
         if still_open:
-            target = mv.minimal_safe_version(current, [f.fixed_versions for f in still_open])
+            per_cve = [f.fixed_versions for f in still_open]
+            # never below the highest version any module already uses (no downgrades anywhere)
+            if all(mv.fixes(highest, fx) for fx in per_cve):
+                target = highest
+            else:
+                target = mv.minimal_safe_version(highest, per_cve)
             if target is None:  # no single listed version fixes all: take the highest listed fix
                 target = max((v for f in still_open for v in f.fixed_versions), key=mv.sort_key)
             upgrades.append(Upgrade(target=target, cves=sorted(still_open, key=_cve_order),
@@ -257,6 +282,7 @@ def evaluate(raw_findings: list[dict], inv: Inventory) -> Result:
         unmatched={k: sorted(v) for k, v in sorted(unmatched.items())},
         total_findings=total,
         rejected=rejected,
+        maven_dir=inv.maven_dir,
     )
 
 

@@ -30,14 +30,12 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/wiz"
-          mkdir -p "$out"
-          (cd tests/fixtures/sample-project && mvn -B -ntp -q \
-            org.apache.maven.plugins:maven-dependency-plugin:3.11.0:tree \
-            -DoutputType=json -DappendOutput=true -DoutputFile="$out/dependency-tree.json")
-          python -m wizconnector deps --tree "$out/dependency-tree.json" \
-            --repo-root tests/fixtures/sample-project --out "$out/direct-deps.json"
-          # the publish job only gets direct-deps.json + findings.json (no POMs, no trees)
+          # same script the workflow's pre-agent step and publish job run
+          GITHUB_WORKSPACE="$PWD/tests/fixtures/sample-project" WIZ_CONNECTOR="$PWD" \
+            bash scripts/resolve-deps.sh "$out"
+          test "$(jq '.direct | length' "$out/direct-deps.json")" -eq 5
           python -m wizconnector report --deps "$out/direct-deps.json" \
+            --maven-version-file "$out/maven-version.txt" \
             --findings tests/fixtures/wiz-findings.json --out-dir "$out/report"
           test "$(jq '.upgrades | length' "$out/report/report.json")" -eq 4
           cat "$out/report/issue-body.md" >> "$GITHUB_STEP_SUMMARY"

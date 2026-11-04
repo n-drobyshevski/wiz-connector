@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 
+from . import mvnversion as mv
 from .findings import Result, Upgrade
 
 MARKER = "wiz-connector:maven-direct-vulns"
@@ -37,7 +38,7 @@ def _ok(regex: re.Pattern, value) -> bool:
 
 def _md(value) -> str:
     """Neutralise characters that could break out of a Markdown code span / table cell."""
-    return str(value).replace("`", "'").replace("|", "/").replace("\n", " ").replace("<", "&lt;").replace(">", "&gt;")
+    return str(value).replace("`", "'").replace("|", "/").replace("\n", " ").replace("\r", " ").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def fingerprint(result: Result) -> str:
@@ -69,7 +70,7 @@ def edit_hint(decl: dict) -> str:
     if k == "property":
         return f"`{f}` `<{prop}>`"
     if k == "external-property":
-        return f"add `<{prop}>` to `<properties>` of the top POM"
+        return f"add `<{prop}>` to `<properties>` of `{f}`"
     if k == "managed-external":
         return f"pin in `<dependencyManagement>` of `{f}`"
     if k == "project-version":
@@ -88,10 +89,11 @@ def _edits(u: Upgrade) -> list[dict]:
 
 
 def fix_commands(ups: list[Upgrade]) -> list[str]:
-    """One command per edit location; shared properties are bumped once to the highest target."""
+    """One command per property / literal coordinate; a property is bumped once, to the highest
+    target of the rows using it. Anything unusual becomes an "edit by hand" comment."""
     from . import mvnversion as mv
 
-    props: dict[tuple, tuple[str, list[str]]] = {}
+    props: dict[str, dict] = {}
     lines: list[str] = []
     manual: list[str] = []
     literal_done: set[str] = set()
@@ -100,28 +102,38 @@ def fix_commands(ups: list[Upgrade]) -> list[str]:
         for d in _edits(u):
             kind = d.get("kind")
             if not safe or not _ok(_SAFE_PATH, d.get("file", "pom.xml")) or (
-                    kind == "property" and not _ok(_SAFE_PROP, d.get("property"))):
+                    kind in ("property", "external-property") and not _ok(_SAFE_PROP, d.get("property"))):
                 manual.append(f"# {i}. row {i}: edit by hand (unusual characters in its POM declaration)")
                 continue
             if kind == "property":
-                key = (d["file"], d["property"])
-                cur = props.get(key)
-                if cur is None or mv.compare(u.target, cur[0]) > 0:
-                    props[key] = (u.target, (cur[1] if cur else []) + [u.ga.split(":")[1]])
-                else:
-                    cur[1].append(u.ga.split(":")[1])
+                p = props.setdefault(d["property"], {"target": u.target, "files": set(), "rows": set(), "shared": set()})
+                if mv.compare(u.target, p["target"]) > 0:
+                    p["target"] = u.target
+                p["files"].add(d["file"])
+                p["rows"].add(u.ga)
+                p["shared"].update(u.shared_with)
             elif kind == "literal" and u.ga not in literal_done:
                 literal_done.add(u.ga)
                 lines.append(f"# {i}. {u.ga.split(':')[1]} {u.current} -> {u.target} ({d['file']})")
                 lines.append(f"mvn -B -ntp {VERSIONS_PLUGIN}:use-dep-version -Dincludes={u.ga} "
                              f"-DdepVersion={u.target} -DprocessProperties=true -DgenerateBackupPoms=false")
             elif kind in ("external-property", "managed-external", "project-version", "unknown"):
-                manual.append(f"# {i}. {u.ga} -> {u.target}: edit by hand, {edit_hint(d)}")
-    for (file, prop), (target, arts) in sorted(props.items()):
-        lines.append(f"# property {prop} in {file} -> {target} (used by {', '.join(sorted(set(arts)))})")
+                manual.append(f"# {i}. {u.ga.split(':')[1]} -> {u.target}: edit by hand, {_plain(edit_hint(d))}")
+    for prop, p in sorted(props.items()):
+        others = sorted(p["shared"] - p["rows"])
+        lines.append(f"# property {prop} ({', '.join(sorted(p['files']))}) -> {p['target']}"
+                     f" for {', '.join(g.split(':')[1] for g in sorted(p['rows']))}")
+        if others:
+            lines.append(f"#   SHARED with {', '.join(g.split(':')[1] for g in others)}: {p['target']} must exist for them"
+                         " too (micro-patches such as jackson-databind 2.12.7.1 do not); otherwise use the next"
+                         " common release, or pin the vulnerable artifact with use-dep-version instead")
         lines.append(f"mvn -B -ntp {VERSIONS_PLUGIN}:set-property -Dproperty={prop} "
-                     f"-DnewVersion={target} -DgenerateBackupPoms=false")
+                     f"-DnewVersion={p['target']} -DgenerateBackupPoms=false")
     return lines + manual
+
+
+def _plain(text: str) -> str:
+    return text.replace("`", "")
 
 
 def _sev(u: Upgrade) -> str:
@@ -158,6 +170,8 @@ def payload(result: Result, repo: str, ref: str | None, generated_at: str, run_u
             "edit": [{k: v for k, v in d.items() if k in ("kind", "file", "property", "section", "used_in", "boms", "external_parent")}
                      for d in _edits(u)],
             "also_transitive_in": u.also_transitive_in,
+            "module_versions": u.module_versions,
+            "shared_with": u.shared_with,
         }
 
     return {
@@ -167,6 +181,7 @@ def payload(result: Result, repo: str, ref: str | None, generated_at: str, run_u
         "generated_at": generated_at,
         "run_url": run_url,
         "maven": maven,
+        "maven_dir": result.maven_dir,
         "fingerprint": fingerprint(result),
         "upgrades": [up(u) for u in result.upgrades],
         "excluded": {
@@ -194,9 +209,11 @@ def body(result: Result, repo: str, ref: str | None, generated_at: str, run_url:
     shrinkers = [
         lambda: data.__setitem__("excluded", {k: (dict(list(v.items())[:30]) if isinstance(v, dict) else v)
                                               for k, v in data["excluded"].items()}),
-        lambda: [u.__setitem__("cves", u["cves"][:25] + [f"+{len(u['cves']) - 25} more"])
-                 for u in data["upgrades"] if len(u["cves"]) > 25],
+        lambda: [u.__setitem__(k, u[k][:25] + [f"+{len(u[k]) - 25} more"])
+                 for u in data["upgrades"] for k in ("cves", "unfixed_cves", "modules", "also_transitive_in", "shared_with")
+                 if len(u[k]) > 25],
         lambda: data.__setitem__("excluded", {"truncated": True}),
+        lambda: [u.update(module_versions={}, edit=u["edit"][:5]) for u in data["upgrades"]],
     ]
     for shrink in shrinkers:
         if len(text) <= MAX_BODY:
@@ -208,7 +225,10 @@ def body(result: Result, repo: str, ref: str | None, generated_at: str, run_url:
         ups, data["upgrades"] = ups[:keep], data["upgrades"][:keep]
         data["truncated_upgrades"] = len(result.upgrades) - keep
         text = _body(ups, data, verify_cmd)
-    return text
+    if len(text) > MAX_BODY:          # a single pathological row: drop the JSON block, then hard-cap
+        data["omit_json"] = True
+        text = _body(ups, data, verify_cmd)
+    return text if len(text) <= MAX_BODY else text[:MAX_BODY - 200] + "\n\n(truncated to fit the issue size limit)\n"
 
 
 def _body(ups: list[Upgrade], data: dict, verify_cmd: str) -> str:
@@ -216,8 +236,10 @@ def _body(ups: list[Upgrade], data: dict, verify_cmd: str) -> str:
     n_crit = sum(1 for u in ups if u.max_severity == "CRITICAL")
     n_kev = sum(1 for u in ups if u.kev)
     run = f" · [run]({data['run_url']})" if data.get("run_url") else ""
-    ref = f" @ `{data['ref']}`" if data.get("ref") else ""
-    mvn = f" ({data['maven']})" if data.get("maven") else ""
+    ref = f" @ `{_md(data['ref'])}`" if data.get("ref") else ""
+    mvn = f" ({_md(data['maven'])})" if data.get("maven") else ""
+    mdir = data.get("maven_dir") or "."
+    mdir_ok = _ok(_SAFE_PATH, mdir) or mdir == "."
     gas = ",".join(u.ga for u in ups if _ok(_SAFE_COORD, u.ga))
     lines = [
         f"<!-- {MARKER} fingerprint={data['fingerprint']} -->",
@@ -233,13 +255,18 @@ def _body(ups: list[Upgrade], data: dict, verify_cmd: str) -> str:
     ]
     for i, u in enumerate(ups, 1):
         edits = "<br>".join(edit_hint(d) for d in _edits(u)) or "locate declaration"
+        if u.shared_with:
+            edits += " (shared property)"
+        others = sorted(set(u.module_versions.values()) - {u.current}, key=mv.sort_key)
+        cur = f"`{_md(u.current)}`" + (f" (also {', '.join('`' + _md(v) + '`' for v in others)})" if others else "")
         lines.append(
-            f"| {i} | `{_md(u.ga)}` | `{_md(u.current)}` → `{_md(u.target)}` ({u.bump}) | {_sev(u)} | {_cve_cell(u)} | {edits} |"
+            f"| {i} | `{_md(u.ga)}` | {cur} → `{_md(u.target)}` ({u.bump}) | {_sev(u)} | {_cve_cell(u)} | {edits} |"
         )
     lines += [
         "",
-        "### Fix commands (run from the repository root)",
+        "### Fix commands (bash, from the repository root)",
         "```bash",
+        *([f"cd {mdir}"] if mdir != "." and mdir_ok else []),
         *fix_commands(ups),
         "git diff --stat   # versions-maven-plugin only WARNs when a version is managed elsewhere: every Edit file must change",
         verify_cmd,
@@ -264,11 +291,11 @@ def _body(ups: list[Upgrade], data: dict, verify_cmd: str) -> str:
     if ex.get("transitive"):
         n = sum(len(v) for v in ex["transitive"].values())
         excluded_lines.append(f"- **Transitive** (fixed by bumping the parent dependency, not listed): {n} CVEs in "
-                              + ", ".join(f"`{g}`" for g in ex["transitive"]))
+                              + ", ".join(f"`{_md(g)}`" for g in ex["transitive"]))
     if ex.get("no_fix"):
-        excluded_lines.append("- **Direct, no fixed version yet:** " + ", ".join(f"`{g}` ({len(v)})" for g, v in ex["no_fix"].items()))
+        excluded_lines.append("- **Direct, no fixed version yet:** " + ", ".join(f"`{_md(g)}` ({len(v)})" for g, v in ex["no_fix"].items()))
     if ex.get("already_fixed"):
-        excluded_lines.append("- **Already fixed in current tree** (stale Wiz data): " + ", ".join(f"`{g}`" for g in ex["already_fixed"]))
+        excluded_lines.append("- **Already fixed in current tree** (stale Wiz data): " + ", ".join(f"`{_md(g)}`" for g in ex["already_fixed"]))
     if ex.get("not_in_maven_tree"):
         excluded_lines.append(f"- **Not in the Maven tree** (other ecosystem/branch): {len(ex['not_in_maven_tree'])} packages")
     if ex.get("rejected_records"):
@@ -281,6 +308,8 @@ def _body(ups: list[Upgrade], data: dict, verify_cmd: str) -> str:
     if excluded_lines:
         lines += ["", "<details><summary>Not included</summary>", "", *excluded_lines, "", "</details>"]
 
+    if data.get("omit_json"):
+        return "\n".join(lines + ["", "(machine-readable block omitted: too large)", ""])
     lines += [
         "",
         f"<details><summary>Machine-readable ({SCHEMA})</summary>",

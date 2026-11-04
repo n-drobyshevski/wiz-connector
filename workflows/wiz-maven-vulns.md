@@ -23,7 +23,7 @@ engine:
     tool-timeout: 3m          # Wiz allows 2-minute queries; the gateway default is 60s
 
 models:
-  allowed: ["gpt-*"]          # firewall-enforced: no other model family can be called
+  allowed: ["gpt-*"]          # enforced by the agent job's API proxy (detection is pinned below)
 
 strict: true
 timeout-minutes: 25
@@ -32,6 +32,17 @@ concurrency:
   group: wiz-maven-vulns-${{ github.repository }}
   cancel-in-progress: false
 
+env:
+  MAVEN_DIR: "."              # directory of the root (reactor) pom.xml, relative to the repo root
+
+# Declaring checkouts here keeps gh-aw's default checkout of this repository; an actions/checkout
+# inside steps: would silently replace it.
+checkout:
+  - {}
+  - repository: n-drobyshevski/wiz-connector
+    ref: v1                   # pin a commit SHA for stricter supply-chain control
+    path: .wiz-connector
+
 network:
   allowed:
     - defaults                # mcp.app.wiz.io is added automatically from mcp-servers.wiz.url
@@ -39,7 +50,7 @@ network:
 tools:
   github: false               # the agent needs no GitHub access
   edit:                       # to write /tmp/gh-aw/agent/wiz/findings.json
-  bash: ["cat", "jq", "wc", "head"]
+  bash: ["cat", "jq", "wc", "head", "base64"]
 
 mcp-servers:
   wiz:
@@ -60,39 +71,17 @@ steps:
       distribution: temurin
       java-version: "21"
       cache: maven
-  - name: Check out wiz-connector scripts
-    uses: actions/checkout@v6
-    with:
-      repository: n-drobyshevski/wiz-connector
-      ref: v1
-      path: .wiz-connector
-      persist-credentials: false
   - name: Resolve direct Maven dependencies
-    env:
-      MAVEN_DIR: "."            # directory of the root (reactor) pom.xml
     run: |
       set -euo pipefail
       OUT=/tmp/gh-aw/agent/wiz
-      mkdir -p "$OUT"
-      rm -f "$OUT/dependency-tree.json"          # the plugin appends to an existing file
-      cd "$MAVEN_DIR"
-      MVN=mvn; [ -x ./mvnw ] && MVN=./mvnw
-      "$MVN" -v | head -1 > "$OUT/maven-version.txt"
-      # From the reactor root, no -pl: every module becomes its own tree root.
-      "$MVN" -B -ntp org.apache.maven.plugins:maven-dependency-plugin:3.11.0:tree \
-        -DoutputType=json -DappendOutput=true -DoutputFile="$OUT/dependency-tree.json" > "$OUT/mvn-tree.log" 2>&1 \
-        || { tail -50 "$OUT/mvn-tree.log"; exit 1; }
-      if grep -Eq 'The POM for .* is missing' "$OUT/mvn-tree.log"; then
-        grep -E 'The POM for .* is missing' "$OUT/mvn-tree.log"
-        echo "::error::dependency tree is incomplete (missing POMs); fix repository access first"
-        exit 1
-      fi
-      PYTHONPATH="$GITHUB_WORKSPACE/.wiz-connector" python3 -m wizconnector deps \
-        --tree "$OUT/dependency-tree.json" --repo-root . --out "$OUT/direct-deps.json"
-      cp "$GITHUB_WORKSPACE/.wiz-connector/schemas/wiz-findings.schema.json" "$OUT/"
+      bash .wiz-connector/scripts/resolve-deps.sh "$OUT"
+      cp .wiz-connector/schemas/wiz-findings.schema.json "$OUT/"
+      printf 'repository=%s\nbranch=%s\n' "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" > "$OUT/context.txt"
 
 safe-outputs:
   staged: ${{ github.event_name == 'workflow_dispatch' && inputs.staged }}
+  allowed-domains: ["app.wiz.io"]   # keep Wiz portal links in sanitized agent outputs
   create-issue: false         # the custom job below is the only writer
   noop:
     report-as-issue: false
@@ -118,11 +107,18 @@ safe-outputs:
           description: One line, e.g. "findings=12 other=40"
           required: true
           type: string
-        findings_json:
-          description: ONLY if writing findings.json failed, the same JSON document as a string (max 10 KB)
+        findings_json_b64:
+          description: ONLY if writing findings.json failed, the same JSON document base64-encoded (max 10 KB)
           required: false
           type: string
       steps:
+        # The agent can write /tmp/gh-aw/agent, so only findings.json is taken from it. The
+        # dependency inventory is rebuilt here from the same commit.
+        - name: Check out the repository (same commit as the agent run)
+          uses: actions/checkout@v6
+          with:
+            ref: ${{ github.sha }}
+            persist-credentials: false
         - name: Check out wiz-connector scripts
           uses: actions/checkout@v6
           with:
@@ -130,6 +126,14 @@ safe-outputs:
             ref: v1
             path: .wiz-connector
             persist-credentials: false
+        - name: Set up JDK
+          uses: actions/setup-java@v6
+          with:
+            distribution: temurin
+            java-version: "21"
+            cache: maven
+        - name: Rebuild the dependency inventory (trusted)
+          run: bash .wiz-connector/scripts/resolve-deps.sh "$RUNNER_TEMP/wiz-inventory"
         - name: Join, render and publish
           env:
             GH_TOKEN: ${{ github.token }}
@@ -137,12 +141,12 @@ safe-outputs:
             RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           run: |
             set -euo pipefail
-            D="$(dirname "$GH_AW_AGENT_OUTPUT")/agent/wiz"
+            INV="$RUNNER_TEMP/wiz-inventory"
             export PYTHONPATH="$GITHUB_WORKSPACE/.wiz-connector"
             python3 -m wizconnector report \
-              --deps "$D/direct-deps.json" \
-              --findings "$D/findings.json" --agent-output "$GH_AW_AGENT_OUTPUT" \
-              --maven-version-file "$D/maven-version.txt" \
+              --deps "$INV/direct-deps.json" --maven-version-file "$INV/maven-version.txt" \
+              --findings "$(dirname "$GH_AW_AGENT_OUTPUT")/agent/wiz/findings.json" \
+              --agent-output "$GH_AW_AGENT_OUTPUT" \
               --run-url "$RUN_URL" --out-dir "$RUNNER_TEMP/wiz-report"
             python3 -m wizconnector publish --out-dir "$RUNNER_TEMP/wiz-report" --label wiz-sca
 ---
@@ -154,7 +158,7 @@ You are a read-only data-export step. A deterministic script joins your output w
 never invent CVEs, versions or fixed versions.
 
 ## Inputs
-- Repository: `${{ github.repository }}`, branch `${{ github.ref_name }}`
+- Repository: `${{ github.repository }}`; the scanned branch is in `/tmp/gh-aw/agent/wiz/context.txt`
 - `/tmp/gh-aw/agent/wiz/direct-deps.txt`: this repo's direct Maven dependencies, one
   `groupId:artifactId:version` per line. Read it first.
 - `/tmp/gh-aw/agent/wiz/wiz-findings.schema.json`: the JSON schema of your output.
@@ -175,16 +179,19 @@ Never use a tool that creates, updates or deletes anything. Prefer filtered, pag
 
 ## Steps
 1. Step A: locate the repository by name and URL. Use the default branch Wiz scanned unless
-   `${{ github.ref_name }}` is also scanned.
+   the branch in `context.txt` is also scanned.
 2. Step B: fetch OPEN vulnerability findings for that branch; paginate until done. Keep only
    Maven/Java library findings.
 3. Write `/tmp/gh-aw/agent/wiz/findings.json` with **only** the findings whose artifactId is in
    `direct-deps.txt` (case-insensitive); count the other Maven findings in `other_findings_count`.
    Per finding: `cve` (CVE/GHSA id), `package` (`groupId:artifactId`), `version`,
    `fixed_versions` (array, `[]` if none), `severity`, and `cvss`, `has_exploit`, `cisa_kev`,
-   `url` when available. Add `wiz_scope` (repository name/id, branch, tool calls).
+   `url` when available. Always add `wiz_scope` with the Wiz `resource_name` and/or `resource_id`
+   of the repository, the branch and the number of tool calls: without it an empty list is
+   rejected.
 4. Call `publish_wiz_report` once with `summary: "findings=<n> other=<m>"`.
-   Only if you could not write the file, also pass the JSON document as `findings_json`.
+   Only if you could not write the file, also pass the JSON document base64-encoded as
+   `findings_json_b64` (`jq -c . file | base64 -w0`).
 
 ## When Wiz fails
 If authentication fails, Wiz is unreachable, or Wiz does not know this repository, do **not**

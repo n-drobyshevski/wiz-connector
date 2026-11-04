@@ -35,14 +35,12 @@ def load_trees(paths: list[Path]) -> list[dict]:
                 roots.extend(obj)
             else:
                 roots.append(obj)
-    # the same module can appear twice if a file was appended to on a previous run
-    seen, unique = set(), []
+    # a module can appear twice if the file was appended to on an earlier run: the LAST one is current
+    latest: dict[str, dict] = {}
     for r in roots:
-        key = (ga(r), r.get("version"))
-        if key not in seen:
-            seen.add(key)
-            unique.append(r)
-    return unique
+        latest.pop(ga(r), None)
+        latest[ga(r)] = r
+    return list(latest.values())
 
 
 @dataclass
@@ -51,6 +49,7 @@ class DirectDep:
     version: str
     scopes: set[str] = field(default_factory=set)
     modules: set[str] = field(default_factory=set)        # reactor module GAs declaring it
+    module_versions: dict[str, str] = field(default_factory=dict)  # module GA -> resolved version
     optional: bool = False
     other_versions: set[str] = field(default_factory=set)  # differing resolved versions across modules
     also_transitive_in: set[str] = field(default_factory=set)
@@ -70,9 +69,11 @@ class Inventory:
     reactor: dict[str, str]                      # module GA -> version
     direct: dict[str, DirectDep]
     transitive: dict[str, TransitiveDep]
+    maven_dir: str = "."                         # reactor root, relative to the repository root
 
     def to_json(self) -> dict:
         return {
+            "maven_dir": self.maven_dir,
             "reactor": sorted(self.reactor),
             "direct": [
                 {
@@ -81,6 +82,7 @@ class Inventory:
                     "other_versions": sorted(d.other_versions),
                     "scopes": sorted(d.scopes),
                     "modules": sorted(d.modules),
+                    "module_versions": dict(sorted(d.module_versions.items())),
                     "optional": d.optional,
                     "also_transitive_in": sorted(d.also_transitive_in),
                     "declarations": d.declarations,
@@ -101,6 +103,7 @@ class Inventory:
             direct[d["ga"]] = DirectDep(
                 ga=d["ga"], version=d["version"], scopes=set(d.get("scopes", [])),
                 modules=set(d.get("modules", [])), optional=bool(d.get("optional")),
+                module_versions=dict(d.get("module_versions", {})),
                 other_versions=set(d.get("other_versions", [])),
                 also_transitive_in=set(d.get("also_transitive_in", [])),
                 declarations=list(d.get("declarations", [])),
@@ -110,7 +113,8 @@ class Inventory:
                                    via=set(t.get("via", [])), modules=set(t.get("modules", [])))
             for t in data.get("transitive", [])
         }
-        return cls(reactor={g: "" for g in data.get("reactor", [])}, direct=direct, transitive=transitive)
+        return cls(reactor={g: "" for g in data.get("reactor", [])}, direct=direct, transitive=transitive,
+                   maven_dir=data.get("maven_dir", "."))
 
 
 def build_inventory(roots: list[dict]) -> Inventory:
@@ -130,6 +134,8 @@ def build_inventory(roots: list[dict]) -> Inventory:
             elif child.get("version") and child.get("version") != d.version:
                 d.other_versions.add(child["version"])
             d.modules.add(module)
+            if child.get("version"):
+                d.module_versions[module] = child["version"]
             if child.get("scope"):
                 d.scopes.add(child["scope"])
             if str(child.get("optional", "false")).lower() == "true":

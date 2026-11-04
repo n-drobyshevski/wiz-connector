@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -25,11 +26,12 @@ from .pomlocate import PomIndex, locate
 SAFE_JOB_TYPE = "publish_wiz_report"
 
 
-def _inventory_from_trees(trees: list[str], repo_root: str) -> Inventory:
+def _inventory_from_trees(trees: list[str], repo_root: str, maven_dir: str = ".") -> Inventory:
     roots = load_trees([Path(t) for t in trees])
     if not roots:
         sys.exit("error: no dependency trees found (did `mvn dependency:tree -DoutputType=json` run?)")
     inv = build_inventory(roots)
+    inv.maven_dir = maven_dir
     index = PomIndex(Path(repo_root))
     for d in inv.direct.values():
         d.declarations = [dict(locate(index, m, d.ga), module=m) for m in sorted(d.modules)]
@@ -41,7 +43,7 @@ def _inventory(a) -> Inventory:
         return Inventory.from_json(json.loads(Path(a.deps).read_text(encoding="utf-8")))
     if not a.tree:
         sys.exit("error: pass --deps or --tree")
-    return _inventory_from_trees(a.tree, a.repo_root)
+    return _inventory_from_trees(a.tree, a.repo_root, a.maven_dir)
 
 
 def _gh_output(**kv) -> None:
@@ -60,40 +62,57 @@ def _summary(text: str) -> None:
             fh.write(text + "\n")
 
 
-def _from_agent_output(path: str) -> dict | list | None:
-    """gh-aw fallback: the agent passed the findings JSON as the `findings_json` tool input."""
+def _from_agent_output(path: str):
+    """gh-aw fallback: the agent passed the findings document as a tool input. Base64 is preferred
+    because gh-aw's sanitizer rewrites URLs, mentions and `{{` inside plain string inputs."""
     try:
         out = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     items = [i for i in out.get("items", []) if i.get("type") == SAFE_JOB_TYPE]
     for item in items[:1]:
-        raw = item.get("findings_json")
-        if isinstance(raw, str) and raw.strip():
-            return json.loads(raw)
+        try:
+            if isinstance(item.get("findings_json_b64"), str) and item["findings_json_b64"].strip():
+                return json.loads(base64.b64decode(item["findings_json_b64"], validate=True).decode("utf-8"))
+            if isinstance(item.get("findings_json"), str) and item["findings_json"].strip():
+                return json.loads(item["findings_json"])
+        except (ValueError, json.JSONDecodeError) as exc:
+            sys.exit(f"error: findings passed through the agent output are not valid JSON ({exc})")
     return None
 
 
-def _load_findings(path: str, agent_output: str | None) -> list[dict]:
+def _load_findings(path: str, agent_output: str | None) -> tuple[list[dict], dict]:
+    """Return (records, document). Fails closed: only a well-formed answer from Wiz may close the issue."""
     p = Path(path)
     if p.is_file():
-        data = json.loads(p.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            sys.exit(f"error: {path} is not valid JSON ({exc})")
     elif agent_output and (data := _from_agent_output(agent_output)) is not None:
         pass
     else:
-        sys.exit(f"error: findings file {path} not found and no findings_json in the agent output")
-    if isinstance(data, dict):
-        if data.get("error"):
-            # fail loudly: an outage must never look like "no vulnerabilities" (which closes the issue)
-            sys.exit(f"error: the agent reported a Wiz fetch error: {str(data['error'])[:500]}")
-        data = data.get("findings", [])
-    if not isinstance(data, list):
-        sys.exit("error: findings must be a list or an object with a 'findings' list")
-    return data
+        sys.exit(f"error: findings file {path} not found and no findings in the agent output")
+    if isinstance(data, list):
+        data = {"findings": data}
+    if not isinstance(data, dict):
+        sys.exit("error: findings must be an object with a 'findings' list")
+    if data.get("error"):
+        # an outage must never look like "no vulnerabilities" (which closes the issue)
+        sys.exit(f"error: the agent reported a Wiz fetch error: {str(data['error'])[:300]!r}")
+    if not isinstance(data.get("findings"), list):
+        sys.exit("error: findings document has no 'findings' list")
+    return data["findings"], data
+
+
+def _scope_known(doc: dict) -> bool:
+    scope = doc.get("wiz_scope") or {}
+    return isinstance(scope, dict) and any(isinstance(scope.get(k), str) and scope[k].strip()
+                                           for k in ("resource_id", "resource_name"))
 
 
 def cmd_deps(a) -> None:
-    inv = _inventory_from_trees(a.tree, a.repo_root)
+    inv = _inventory_from_trees(a.tree, a.repo_root, a.maven_dir)
     out = inv.to_json()
     Path(a.out).write_text(json.dumps(out, indent=1), encoding="utf-8")
     # compact list the agent uses to scope its Wiz queries
@@ -105,7 +124,13 @@ def cmd_deps(a) -> None:
 
 def cmd_report(a) -> None:
     inv = _inventory(a)
-    res = fnd.evaluate(_load_findings(a.findings, a.agent_output), inv)
+    records, doc = _load_findings(a.findings, a.agent_output)
+    res = fnd.evaluate(records, inv)
+    if records and res.rejected == len(records):
+        sys.exit(f"error: all {len(records)} findings were rejected as malformed; refusing to publish")
+    if not records and not _scope_known(doc):
+        sys.exit("error: empty findings without wiz_scope.resource_id/resource_name: cannot tell "
+                 "'no vulnerabilities' from 'repository not found'; refusing to close the issue")
     now = a.generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
     maven = a.maven
     if a.maven_version_file and Path(a.maven_version_file).is_file():
@@ -139,6 +164,7 @@ def cmd_publish(a) -> None:
         close_when_clean=not a.keep_open, assignees=[x for x in (a.assignee or "").split(",") if x],
         extra_labels=[x for x in (a.extra_labels or "").split(",") if x], dry_run=a.dry_run or staged,
         on_change=a.on_change,
+        trusted_authors=tuple(x.strip() for x in a.trusted_author.split(",") if x.strip()) or pub.DEFAULT_TRUSTED_AUTHORS,
     )
     mode = " (dry run)" if a.dry_run or staged else ""
     print(f"issue action: {p.action} #{p.number or '-'}{mode}")
@@ -155,7 +181,8 @@ def main(argv=None) -> None:
 
     d = sub.add_parser("deps", help="direct/transitive inventory (with edit locations) from dependency:tree JSON")
     d.add_argument("--tree", action="append", required=True)
-    d.add_argument("--repo-root", default=".")
+    d.add_argument("--repo-root", default=".", help="repository root (edit paths are relative to it)")
+    d.add_argument("--maven-dir", default=".", help="reactor root relative to --repo-root (where fix commands run)")
     d.add_argument("--out", default="direct-deps.json")
     d.set_defaults(fn=cmd_deps)
 
@@ -163,6 +190,7 @@ def main(argv=None) -> None:
     r.add_argument("--deps", help="inventory written by `deps` (preferred; no POMs needed)")
     r.add_argument("--tree", action="append")
     r.add_argument("--repo-root", default=".")
+    r.add_argument("--maven-dir", default=".")
     r.add_argument("--findings", required=True)
     r.add_argument("--agent-output", help="gh-aw agent_output.json: fallback source of findings_json")
     r.add_argument("--out-dir", default="wiz-report")
@@ -184,6 +212,8 @@ def main(argv=None) -> None:
     p.add_argument("--assignee", default="", help="comma-separated; '@copilot' assigns the Copilot cloud agent")
     p.add_argument("--on-change", choices=["update", "replace"], default="update")
     p.add_argument("--keep-open", action="store_true", help="do not close the issue when nothing is left")
+    p.add_argument("--trusted-author", default=",".join(pub.DEFAULT_TRUSTED_AUTHORS),
+                   help="comma-separated logins whose marked issues may be updated/closed")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_publish)
 

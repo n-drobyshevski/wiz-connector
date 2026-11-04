@@ -152,7 +152,7 @@ def _property_location(name: str, chain: list[Pom]) -> Pom | None:
     return None
 
 
-def _describe_version(pom: Pom, dep: ET.Element, chain_from_pom: list[Pom], section: str) -> dict:
+def _describe_version(pom: Pom, dep: ET.Element, module_chain: list[Pom], section: str) -> dict:
     version = _text(dep, "version")
     if version is None:
         return {}
@@ -162,11 +162,12 @@ def _describe_version(pom: Pom, dep: ET.Element, chain_from_pom: list[Pom], sect
     prop = m.group(1)
     if prop in ("project.version", "pom.version", "version"):
         return {"kind": "project-version", "file": pom.rel, "section": section}
-    owner = _property_location(prop, chain_from_pom)
+    owner = _property_location(prop, module_chain)
     if owner:
         return {"kind": "property", "file": owner.rel, "property": prop,
                 "value": owner.properties[prop], "used_in": pom.rel, "section": section}
     return {"kind": "external-property", "property": prop, "used_in": pom.rel, "section": section,
+            "file": module_chain[-1].rel,
             "hint": f"Property ${{{prop}}} comes from an external parent; override it in <properties> of the top POM."}
 
 
@@ -185,7 +186,8 @@ def locate(index: PomIndex, module_ga: str, dep_ga: str) -> dict:
                 if dep is not None:
                     break
         if dep is not None:
-            desc = _describe_version(p, dep, chain[i:], "dependencies")
+            # properties interpolate in the MODULE's effective model: a child override wins
+            desc = _describe_version(p, dep, chain, "dependencies")
             if desc:
                 return desc
             break  # declared without version -> managed
@@ -194,7 +196,7 @@ def locate(index: PomIndex, module_ga: str, dep_ga: str) -> dict:
     for i, p in enumerate(chain):
         dep = _find_dep(p.root.find("dependencyManagement/dependencies"), dep_ga, chain[i:])
         if dep is not None:
-            desc = _describe_version(p, dep, chain[i:], "dependencyManagement")
+            desc = _describe_version(p, dep, chain, "dependencyManagement")
             if desc:
                 return desc
 

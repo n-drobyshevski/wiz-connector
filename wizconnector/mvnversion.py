@@ -106,14 +106,24 @@ def fixes(candidate: str, fixed_versions: list[str]) -> bool:
     return any(same_line(candidate, f) and compare(candidate, f) >= 0 for f in fixed_versions)
 
 
+def flavor(version: str) -> str:
+    """Trailing unknown qualifier that selects an artifact flavour, e.g. 'jre' / 'android' (Guava)."""
+    toks = _tokens(version)
+    return toks[-1][2] if toks and toks[-1][0] == "q" and toks[-1][1] == _UNKNOWN_RANK else ""
+
+
 def minimal_safe_version(current: str, per_cve_fixes: list[list[str]]) -> str | None:
     """Smallest version from the advisories' fixed versions that fixes every CVE and is newer
-    than `current`. Pre-releases are only used when nothing else works. Returns None when
+    than `current`. Keeps the current flavour (31.1-jre -> 32.0.0-jre, never -android) when such a
+    candidate exists. Pre-releases are only used when nothing else works. Returns None when
     no single listed version satisfies all CVEs."""
     candidates = sorted(
         {v for fx in per_cve_fixes for v in fx if compare(v, current) > 0},
         key=sort_key,
     )
+    same = [c for c in candidates if flavor(c) == flavor(current)]
+    if same:
+        candidates = same
     for allow_pre in (False, True):
         for cand in candidates:
             if is_prerelease(cand) and not allow_pre:

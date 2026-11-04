@@ -192,7 +192,9 @@ class RenderPublishTests(unittest.TestCase):
         ups = {u.ga: u.target for u in self.res.upgrades}
         self.assertEqual(publish.plan([], fp, ups, True).action, "create")
         self.assertEqual(publish.plan([], fp, {}, True).action, "none")
-        existing = [{"number": 7, "body": b}, {"number": 9, "body": b}, {"number": 3, "body": "unrelated"}]
+        bot = {"login": "app/github-actions"}
+        existing = [{"number": 7, "body": b, "author": bot}, {"number": 9, "body": b, "author": bot},
+                    {"number": 3, "body": "unrelated", "author": bot}]
         p = publish.plan(existing, fp, ups, True)
         self.assertEqual((p.action, p.number, p.duplicates), ("noop", 7, (9,)))
         p = publish.plan(existing, "different", {**ups, "new:dep": "1.0"}, True)
@@ -232,6 +234,23 @@ class HardeningTests(unittest.TestCase):
         self.assertNotIn("mvn", out)
         self.assertEqual(out.count("edit by hand"), 2)
 
+    def test_publish_ignores_foreign_or_misplaced_markers_and_restores_tampering(self):
+        raw = json.loads((FIX / "wiz-findings.json").read_text())["findings"]
+        res = fnd.evaluate(raw, sample_inventory())
+        b = render.body(res, "acme/x", None, "2026-11-04T00:00Z", None)
+        fp, ups = render.fingerprint(res), {u.ga: u.target for u in res.upgrades}
+        bot = {"login": "app/github-actions"}
+        attacker = [{"number": 1, "body": b, "author": {"login": "mallory"}},
+                    {"number": 2, "body": "hello\n" + b, "author": bot}]
+        self.assertEqual(publish.plan(attacker, fp, ups, True, new_body=b).action, "create")
+        # same findings, new timestamp only -> noop; same findings but edited body -> restore
+        later = render.body(res, "acme/x", None, "2026-11-05T00:00Z", "https://x/run/2")
+        mine = [{"number": 5, "body": b, "author": bot}]
+        self.assertEqual(publish.plan(mine, fp, ups, True, new_body=later).action, "noop")
+        tampered = [{"number": 5, "body": b.replace("use-dep-version", "use-dep-version; curl evil"), "author": bot}]
+        p = publish.plan(tampered, fp, ups, True, new_body=later)
+        self.assertEqual((p.action, p.number, p.comment), ("update", 5, None))
+
     def test_ghsa_and_wiz_url_accepted(self):
         f = fnd.normalise({"cve": "GHSA-jfh8-c2jp-5v3q", "package": "a:b", "url": "https://app.wiz.io/explorer/x?y=1"})
         self.assertIsNotNone(f)
@@ -260,7 +279,8 @@ class HardeningTests(unittest.TestCase):
         res = fnd.evaluate(raw, sample_inventory())
         b = render.body(res, "acme/x", None, "t", None)
         ups = {u.ga: u.target for u in res.upgrades}
-        p = publish.plan([{"number": 4, "body": b}], "changed", ups, True, on_change="replace")
+        p = publish.plan([{"number": 4, "body": b, "author": {"login": "app/github-actions"}}], "changed", ups, True,
+                         on_change="replace")
         self.assertEqual((p.action, p.number), ("replace", 4))
 
     def test_agent_output_fallback_and_error(self):
@@ -269,11 +289,89 @@ class HardeningTests(unittest.TestCase):
             ao = Path(td) / "agent_output.json"
             ao.write_text(json.dumps({"items": [{"type": "publish_wiz_report",
                                                  "findings_json": json.dumps({"findings": [{"cve": "CVE-2020-15250", "package": "junit:junit", "fixed_versions": ["4.13.1"], "severity": "MEDIUM"}]})}]}))
-            self.assertEqual(len(cli._load_findings(str(Path(td) / "missing.json"), str(ao))), 1)
+            self.assertEqual(len(cli._load_findings(str(Path(td) / "missing.json"), str(ao))[0]), 1)
             err = Path(td) / "f.json"
             err.write_text(json.dumps({"error": "401 Invalid client credentials", "findings": []}))
             with self.assertRaises(SystemExit):
                 cli._load_findings(str(err), None)
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    def _inv(self, module_versions, prop_decl=None):
+        from wizconnector.maventree import DirectDep, Inventory
+        d = DirectDep(ga="com.fasterxml.jackson.core:jackson-databind", version=list(module_versions.values())[0],
+                      modules=set(module_versions), module_versions=dict(module_versions),
+                      declarations=[prop_decl] if prop_decl else [{"kind": "literal", "file": "pom.xml"}])
+        return Inventory(reactor={m: "1" for m in module_versions}, direct={d.ga: d}, transitive={})
+
+    def test_vulnerable_second_module_not_masked_and_no_downgrade(self):
+        inv = self._inv({"g:a": "2.15.0", "g:b": "2.9.8"})
+        raw = [{"cve": "CVE-2022-42003", "package": "com.fasterxml.jackson.core:jackson-databind",
+                "fixed_versions": ["2.12.7.1", "2.13.4.2"], "severity": "HIGH"}]
+        u = fnd.evaluate(raw, inv).upgrades[0]
+        self.assertEqual((u.current, u.target), ("2.9.8", "2.15.0"))   # never below what module a has
+
+    def test_wiz_uuid_id_and_comma_list(self):
+        f = fnd.normalise({"id": "5f0c2b4e-1111-2222-3333-444455556666", "name": "CVE-2021-44228",
+                           "detailedName": "org.apache.logging.log4j:log4j-core", "fixedVersion": ["2.15.0, 2.12.2"]})
+        self.assertEqual((f.cve, f.fixed_versions), ("CVE-2021-44228", ["2.15.0", "2.12.2"]))
+        self.assertIsNone(fnd.normalise({"cve": "CVE-2021-44228", "package": "a:b", "fixed_versions": ["<script>"]}))
+
+    def test_cli_fails_closed(self):
+        from wizconnector import cli
+        with tempfile.TemporaryDirectory() as td:
+            inv = Path(td) / "inv.json"
+            inv.write_text(json.dumps(sample_inventory().to_json()))
+            cases = {
+                "missing-key": {"wiz_scope": {"resource_name": "acme/x"}},
+                "all-rejected": {"findings": [{"cve": "nope", "package": "a:b"}], "wiz_scope": {"resource_name": "x"}},
+                "empty-no-scope": {"findings": []},
+            }
+            for name, doc in cases.items():
+                f = Path(td) / f"{name}.json"
+                f.write_text(json.dumps(doc))
+                with self.assertRaises(SystemExit, msg=name):
+                    cli.main(["report", "--deps", str(inv), "--findings", str(f), "--out-dir", str(Path(td) / name)])
+            ok = Path(td) / "ok.json"
+            ok.write_text(json.dumps({"findings": [], "wiz_scope": {"resource_name": "acme/x"}}))
+            cli.main(["report", "--deps", str(inv), "--findings", str(ok), "--out-dir", str(Path(td) / "ok")])
+            self.assertEqual(json.loads((Path(td) / "ok" / "report.json").read_text())["upgrades"], [])
+
+    def test_child_property_override_points_to_child(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "web").mkdir()
+            (root / "pom.xml").write_text(
+                "<project><groupId>g</groupId><artifactId>parent</artifactId><version>1</version>"
+                "<properties><jackson.version>2.9.8</jackson.version></properties>"
+                "<dependencyManagement><dependencies><dependency><groupId>j</groupId><artifactId>d</artifactId>"
+                "<version>${jackson.version}</version></dependency></dependencies></dependencyManagement></project>")
+            (root / "web" / "pom.xml").write_text(
+                "<project><parent><groupId>g</groupId><artifactId>parent</artifactId><version>1</version></parent>"
+                "<artifactId>web</artifactId><properties><jackson.version>2.15.0</jackson.version></properties>"
+                "<dependencies><dependency><groupId>j</groupId><artifactId>d</artifactId></dependency></dependencies></project>")
+            d = locate(PomIndex(root), "g:web", "j:d")
+            self.assertEqual((d["kind"], d["file"], d["value"]), ("property", "web/pom.xml", "2.15.0"))
+
+    def test_flavor_kept_and_shared_property_flagged(self):
+        self.assertEqual(mv.minimal_safe_version("31.1-jre", [["32.0.0-android", "32.0.0-jre"]]), "32.0.0-jre")
+        from wizconnector.findings import Upgrade
+        decl = {"kind": "property", "file": "pom.xml", "property": "jackson.version"}
+        u = Upgrade(ga="com.fasterxml.jackson.core:jackson-databind", current="2.9.8", target="2.12.7.1",
+                    declarations=[decl], shared_with=["com.fasterxml.jackson.core:jackson-core"])
+        out = "\n".join(render.fix_commands([u]))
+        self.assertIn("SHARED with jackson-core", out)
+
+    def test_appended_tree_keeps_latest_module(self):
+        old = {"groupId": "g", "artifactId": "m", "version": "1", "children": [
+            {"groupId": "x", "artifactId": "y", "version": "1.0", "scope": "compile"}]}
+        new = {"groupId": "g", "artifactId": "m", "version": "1", "children": [
+            {"groupId": "x", "artifactId": "y", "version": "2.0", "scope": "compile"}]}
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "t.json"
+            p.write_text(json.dumps(old) + "\n" + json.dumps(new))
+            inv = build_inventory(load_trees([p]))
+            self.assertEqual(inv.direct["x:y"].version, "2.0")
 
 
 if __name__ == "__main__":
