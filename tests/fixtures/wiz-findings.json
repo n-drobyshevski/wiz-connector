@@ -10,5 +10,5 @@
  {"cve":"CVE-2024-22262","package":"org.springframework:spring-web","version":"5.3.18","fixed_versions":"6.1.6","severity":"HIGH"},
  {"cve":"CVE-2020-15250","package":"junit:junit","version":"4.12","fixed_versions":"4.13.1","severity":"MEDIUM","cvss":5.5},
  {"cve":"CVE-2023-0000","package":"org.springframework:spring-webmvc","version":"5.3.18","severity":"LOW"},
- {"cve":"CVE-2099-1","package":"lodash","version":"4.17.15","fixed_versions":"4.17.21","severity":"HIGH"}
+ {"cve":"CVE-2021-23337","package":"lodash","version":"4.17.15","fixed_versions":"4.17.21","severity":"HIGH"}
 ]}

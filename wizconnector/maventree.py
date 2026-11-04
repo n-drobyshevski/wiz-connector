@@ -93,6 +93,25 @@ class Inventory:
             ],
         }
 
+    @classmethod
+    def from_json(cls, data: dict) -> "Inventory":
+        """Inverse of to_json (used by the publish job, which has no POMs or trees)."""
+        direct = {}
+        for d in data.get("direct", []):
+            direct[d["ga"]] = DirectDep(
+                ga=d["ga"], version=d["version"], scopes=set(d.get("scopes", [])),
+                modules=set(d.get("modules", [])), optional=bool(d.get("optional")),
+                other_versions=set(d.get("other_versions", [])),
+                also_transitive_in=set(d.get("also_transitive_in", [])),
+                declarations=list(d.get("declarations", [])),
+            )
+        transitive = {
+            t["ga"]: TransitiveDep(ga=t["ga"], versions=set(t.get("versions", [])),
+                                   via=set(t.get("via", [])), modules=set(t.get("modules", [])))
+            for t in data.get("transitive", [])
+        }
+        return cls(reactor={g: "" for g in data.get("reactor", [])}, direct=direct, transitive=transitive)
+
 
 def build_inventory(roots: list[dict]) -> Inventory:
     reactor = {ga(r): r.get("version", "") for r in roots}

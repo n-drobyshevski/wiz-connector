@@ -1,4 +1,12 @@
-"""Render the compact, agent-oriented GitHub issue."""
+"""Render the compact, agent-oriented GitHub issue.
+
+Optimised for GitHub Copilot (VS Code agent mode, Copilot CLI, Copilot cloud agent):
+  * every actionable fact is visible Markdown (table, fix commands, checklist): the cloud agent
+    never sees HTML comments and <details> handling is undocumented;
+  * exact, copy-pasteable commands so the agent runs a plugin instead of rewriting large POMs;
+  * identifiers only (CVE ids, coordinates, versions): no third-party free text enters the prompt;
+  * the hidden marker / fingerprint is used only by the de-duplicating publisher.
+"""
 
 from __future__ import annotations
 
@@ -9,8 +17,11 @@ from .findings import Result, Upgrade
 
 MARKER = "wiz-connector:maven-direct-vulns"
 SCHEMA = "wiz-connector/maven-upgrades@v1"
-MAX_BODY = 60_000          # GitHub hard limit is 65,536 characters
+MAX_BODY = 60_000            # GitHub limit is 65,536; gh-aw's is 65,000
 TABLE_CVES = 3
+VERSIONS_PLUGIN = "org.codehaus.mojo:versions-maven-plugin:2.23.0"
+DEPENDENCY_PLUGIN = "org.apache.maven.plugins:maven-dependency-plugin:3.11.0"
+SKILL = "wiz-maven-bumps"
 
 
 def fingerprint(result: Result) -> str:
@@ -41,9 +52,9 @@ def edit_hint(decl: dict) -> str:
     if k == "property":
         return f"`{decl['file']}` `<{decl['property']}>`"
     if k == "external-property":
-        return f"override `<{decl['property']}>` in top POM"
+        return f"add `<{decl['property']}>` to `<properties>` of the top POM"
     if k == "managed-external":
-        return f"add `<dependencyManagement>` override in `{decl.get('file', 'pom.xml')}`"
+        return f"pin in `<dependencyManagement>` of `{decl.get('file', 'pom.xml')}`"
     if k == "project-version":
         return f"`{decl['file']}` uses `${{project.version}}`"
     return "locate declaration"
@@ -57,6 +68,38 @@ def _edits(u: Upgrade) -> list[dict]:
             seen.add(key)
             out.append(d)
     return out
+
+
+def fix_commands(ups: list[Upgrade]) -> list[str]:
+    """One command per edit location; shared properties are bumped once to the highest target."""
+    from . import mvnversion as mv
+
+    props: dict[tuple, tuple[str, list[str]]] = {}
+    lines: list[str] = []
+    manual: list[str] = []
+    literal_done: set[str] = set()
+    for i, u in enumerate(ups, 1):
+        for d in _edits(u):
+            kind = d.get("kind")
+            if kind == "property":
+                key = (d["file"], d["property"])
+                cur = props.get(key)
+                if cur is None or mv.compare(u.target, cur[0]) > 0:
+                    props[key] = (u.target, (cur[1] if cur else []) + [u.ga.split(":")[1]])
+                else:
+                    cur[1].append(u.ga.split(":")[1])
+            elif kind == "literal" and u.ga not in literal_done:
+                literal_done.add(u.ga)
+                lines.append(f"# {i}. {u.ga.split(':')[1]} {u.current} -> {u.target} ({d['file']})")
+                lines.append(f"mvn -B -ntp {VERSIONS_PLUGIN}:use-dep-version -Dincludes={u.ga} "
+                             f"-DdepVersion={u.target} -DprocessProperties=true -DgenerateBackupPoms=false")
+            elif kind in ("external-property", "managed-external", "project-version", "unknown"):
+                manual.append(f"# {i}. {u.ga} -> {u.target}: edit by hand, {edit_hint(d)}")
+    for (file, prop), (target, arts) in sorted(props.items()):
+        lines.append(f"# property {prop} in {file} -> {target} (used by {', '.join(sorted(set(arts)))})")
+        lines.append(f"mvn -B -ntp {VERSIONS_PLUGIN}:set-property -Dproperty={prop} "
+                     f"-DnewVersion={target} -DgenerateBackupPoms=false")
+    return lines + manual
 
 
 def _sev(u: Upgrade) -> str:
@@ -74,7 +117,8 @@ def _cve_cell(u: Upgrade) -> str:
     return shown + (f" +{len(ids) - TABLE_CVES}" if len(ids) > TABLE_CVES else "")
 
 
-def payload(result: Result, repo: str, ref: str | None, generated_at: str, run_url: str | None) -> dict:
+def payload(result: Result, repo: str, ref: str | None, generated_at: str, run_url: str | None,
+            maven: str | None = None) -> dict:
     def up(u: Upgrade) -> dict:
         return {
             "ga": u.ga,
@@ -100,6 +144,7 @@ def payload(result: Result, repo: str, ref: str | None, generated_at: str, run_u
         "ref": ref,
         "generated_at": generated_at,
         "run_url": run_url,
+        "maven": maven,
         "fingerprint": fingerprint(result),
         "upgrades": [up(u) for u in result.upgrades],
         "excluded": {
@@ -107,6 +152,7 @@ def payload(result: Result, repo: str, ref: str | None, generated_at: str, run_u
             "no_fix": {u.ga: [f.cve for f in u.cves] for u in result.no_fix},
             "already_fixed": result.already_fixed,
             "not_in_maven_tree": result.unmatched,
+            "rejected_records": result.rejected,
         },
     }
 
@@ -118,13 +164,14 @@ def title(result: Result, prefix: str) -> str:
 
 
 def body(result: Result, repo: str, ref: str | None, generated_at: str, run_url: str | None,
-         verify_cmd: str = "mvn -B -ntp verify") -> str:
-    data = payload(result, repo, ref, generated_at, run_url)
+         verify_cmd: str = "mvn -B -ntp verify", maven: str | None = None) -> str:
+    data = payload(result, repo, ref, generated_at, run_url, maven)
     ups = list(result.upgrades)
     text = _body(ups, data, verify_cmd)
-    # progressively shrink until it fits GitHub's body limit
+    # progressively shrink until it fits the body limit
     shrinkers = [
-        lambda: data.__setitem__("excluded", {k: dict(list(v.items())[:30]) for k, v in data["excluded"].items()}),
+        lambda: data.__setitem__("excluded", {k: (dict(list(v.items())[:30]) if isinstance(v, dict) else v)
+                                              for k, v in data["excluded"].items()}),
         lambda: [u.__setitem__("cves", u["cves"][:25] + [f"+{len(u['cves']) - 25} more"])
                  for u in data["upgrades"] if len(u["cves"]) > 25],
         lambda: data.__setitem__("excluded", {"truncated": True}),
@@ -148,12 +195,16 @@ def _body(ups: list[Upgrade], data: dict, verify_cmd: str) -> str:
     n_kev = sum(1 for u in ups if u.kev)
     run = f" · [run]({data['run_url']})" if data.get("run_url") else ""
     ref = f" @ `{data['ref']}`" if data.get("ref") else ""
+    mvn = f" ({data['maven']})" if data.get("maven") else ""
+    gas = ",".join(u.ga for u in ups)
     lines = [
         f"<!-- {MARKER} fingerprint={data['fingerprint']} -->",
-        f"> Auto-generated by wiz-connector from Wiz findings + `mvn dependency:tree`{ref} · {data['generated_at']}{run}",
+        f"> Generated by wiz-connector from Wiz findings + `mvn dependency:tree`{mvn}{ref} · {data['generated_at']}{run}",
         "",
         f"**Goal:** bump {len(ups)} direct Maven dependenc{'y' if len(ups) == 1 else 'ies'} to fix {n_cves} CVEs"
         f" ({n_crit} critical, {n_kev} CISA-KEV). Only direct dependencies are listed: each row is fixed by editing one version declaration.",
+        "",
+        f"**Copilot:** in VS Code agent mode run `/{SKILL} <this issue URL>`, or assign this issue to Copilot.",
         "",
         "| # | Dependency | Bump | Severity | CVEs | Edit |",
         "|--:|---|---|---|---|---|",
@@ -165,14 +216,19 @@ def _body(ups: list[Upgrade], data: dict, verify_cmd: str) -> str:
         )
     lines += [
         "",
-        "### Instructions for the implementing agent",
-        "1. For each row change only the declaration in **Edit** to the **Bump** target"
-        " (a newer patch on the same release line is fine). If a property is shared by several artifacts, bump it once.",
-        "2. Do not add, remove or exclude dependencies and do not pin transitive dependencies.",
-        "3. `major`/`minor` bumps: read the release notes for breaking changes and fix compilation/test failures.",
-        f"4. Verify: `{verify_cmd}` passes, then `mvn -B -ntp dependency:tree -Dincludes=<groupId>:<artifactId>`"
-        " shows the resolved version ≥ target in every listed module.",
-        "5. Open one PR titled `fix(deps): security bumps from Wiz` that lists the CVEs fixed and links this issue.",
+        "### Fix commands (run from the repository root)",
+        "```bash",
+        *fix_commands(ups),
+        "git diff --stat   # versions-maven-plugin only WARNs when a version is managed elsewhere: every Edit file must change",
+        verify_cmd,
+        f"mvn -B -ntp {DEPENDENCY_PLUGIN}:tree -Dincludes={gas}",
+        "```",
+        "",
+        "### Rules",
+        "- Change only the declarations in **Edit** (a newer patch on the same release line is fine).",
+        "- Do not add, remove or exclude dependencies and do not pin transitive dependencies.",
+        "- `major`/`minor` bumps: check release notes; fix only compile/test breakage caused by the bump.",
+        "- One PR titled `fix(deps): security bumps from Wiz`, listing the CVEs fixed and `Fixes` this issue.",
         "",
         "### Acceptance criteria",
     ]
@@ -185,7 +241,7 @@ def _body(ups: list[Upgrade], data: dict, verify_cmd: str) -> str:
     excluded_lines = []
     if ex.get("transitive"):
         n = sum(len(v) for v in ex["transitive"].values())
-        excluded_lines.append(f"- **Transitive** (fix by bumping the parent dependency, not listed): {n} CVEs in "
+        excluded_lines.append(f"- **Transitive** (fixed by bumping the parent dependency, not listed): {n} CVEs in "
                               + ", ".join(f"`{g}`" for g in ex["transitive"]))
     if ex.get("no_fix"):
         excluded_lines.append("- **Direct, no fixed version yet:** " + ", ".join(f"`{g}` ({len(v)})" for g, v in ex["no_fix"].items()))
@@ -193,6 +249,8 @@ def _body(ups: list[Upgrade], data: dict, verify_cmd: str) -> str:
         excluded_lines.append("- **Already fixed in current tree** (stale Wiz data): " + ", ".join(f"`{g}`" for g in ex["already_fixed"]))
     if ex.get("not_in_maven_tree"):
         excluded_lines.append(f"- **Not in the Maven tree** (other ecosystem/branch): {len(ex['not_in_maven_tree'])} packages")
+    if ex.get("rejected_records"):
+        excluded_lines.append(f"- **Rejected:** {ex['rejected_records']} malformed Wiz records")
     if ex.get("truncated"):
         excluded_lines.append("- (exclusion details truncated to fit the issue size limit)")
     if data.get("truncated_upgrades"):

@@ -67,32 +67,59 @@ class Finding:
         return f"{self.group}:{self.artifact}" if self.group else None
 
 
+# --- strict validation ---------------------------------------------------------------
+# Findings come from an LLM that read third-party data; the publish job writes them into an
+# issue that other coding agents execute. Only well-formed identifiers survive: no free text.
+_CVE = re.compile(r"^(CVE-\d{4}-\d{4,7}|GHSA(-[23456789cfghjmpqrvwx]{4}){3})$", re.I)
+_COORD = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]{0,127}$")
+_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-+]{0,63}$")
+_URL = re.compile(r"^https://([a-z0-9-]+\.)*wiz\.io/[A-Za-z0-9_\-./?=&%#~:]*$")
+
+
+def _bool(v) -> bool:
+    return v is True or (isinstance(v, str) and v.strip().lower() == "true")
+
+
 def normalise(raw: dict) -> Finding | None:
-    pkg = _first(raw, "package", "detailedName", "packageName", "component", "library", "name_of_package", default="")
-    cve = _first(raw, "cve", "id", "name", "vulnerability", "externalId", default="")
-    if not pkg or not cve:
+    """Return a validated Finding, or None when the record is malformed (counted as rejected)."""
+    if not isinstance(raw, dict):
+        return None
+    pkg = _first(raw, "package", "detailedName", "packageName", "component", "library", default="")
+    cve = str(_first(raw, "cve", "id", "name", "vulnerability", "externalId", default="")).strip()
+    if not pkg or not _CVE.match(cve):
         return None
     group, artifact = parse_package(str(pkg))
     if raw.get("group") and not group:
-        group = raw["group"]
-    sev = str(_first(raw, "severity", "vendorSeverity", default="UNKNOWN")).upper()
+        group = str(raw["group"]).strip()
+    if not _COORD.match(artifact or "") or (group is not None and not _COORD.match(group)):
+        return None
+    version = str(_first(raw, "version", "installedVersion", "currentVersion", default="")).strip()
+    if version and not _VERSION.match(version):
+        version = ""
+    sev = str(_first(raw, "severity", "vendorSeverity", default="UNKNOWN")).strip().upper()
     cvss = _first(raw, "cvss", "score", "cvssScore")
     try:
         cvss = float(cvss) if cvss is not None else None
+        if cvss is not None and not 0.0 <= cvss <= 10.0:
+            cvss = None
     except (TypeError, ValueError):
         cvss = None
+    url = _first(raw, "url", "link", "portalUrl")
+    url = url if isinstance(url, str) and _URL.match(url) else None
+    fixed = [v for v in split_versions(_first(raw, "fixed_versions", "fixedVersion", "fixedVersions", "fix"))
+             if _VERSION.match(v)]
     return Finding(
-        cve=str(cve).strip(),
+        cve=cve.upper() if cve.upper().startswith("CVE-") else cve,
         group=group,
         artifact=artifact,
-        version=str(_first(raw, "version", "installedVersion", "currentVersion", default="")).strip(),
-        fixed_versions=split_versions(_first(raw, "fixed_versions", "fixedVersion", "fixedVersions", "fix")),
+        version=version,
+        fixed_versions=fixed,
         severity=sev if sev in SEVERITY_RANK else "UNKNOWN",
         cvss=cvss,
-        has_exploit=bool(_first(raw, "has_exploit", "hasExploit", default=False)),
-        cisa_kev=bool(_first(raw, "cisa_kev", "hasCisaKevExploit", "kev", default=False)),
-        url=_first(raw, "url", "link", "portalUrl"),
-        raw_package=str(pkg),
+        has_exploit=_bool(_first(raw, "has_exploit", "hasExploit", default=False)),
+        cisa_kev=_bool(_first(raw, "cisa_kev", "hasCisaKevExploit", "kev", default=False)),
+        url=url,
+        raw_package=str(pkg)[:200],
     )
 
 
@@ -147,6 +174,7 @@ class Result:
     already_fixed: dict[str, list[str]]         # direct deps already at/above the fix (stale Wiz data)
     unmatched: dict[str, list[str]]             # packages not in the Maven tree at all
     total_findings: int
+    rejected: int = 0                           # malformed records dropped by validation
 
 
 def _match_direct(f: Finding, inv: Inventory) -> str | None:
@@ -171,10 +199,11 @@ def evaluate(raw_findings: list[dict], inv: Inventory) -> Result:
     by_direct: dict[str, dict[str, Finding]] = {}
     skipped: dict[str, set] = {}
     unmatched: dict[str, set] = {}
-    total = 0
+    total = rejected = 0
     for raw in raw_findings:
         f = normalise(raw)
         if f is None:
+            rejected += 1
             continue
         total += 1
         g = _match_direct(f, inv)
@@ -227,6 +256,7 @@ def evaluate(raw_findings: list[dict], inv: Inventory) -> Result:
         already_fixed=already,
         unmatched={k: sorted(v) for k, v in sorted(unmatched.items())},
         total_findings=total,
+        rejected=rejected,
     )
 
 

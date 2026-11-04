@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "wiz": {
+      "type": "http",
+      "url": "https://mcp.app.wiz.io",
+      "tools": ["discover", "execute"]
+    }
+  }
+}

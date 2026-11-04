@@ -209,6 +209,8 @@ def locate(index: PomIndex, module_ga: str, dep_ga: str) -> dict:
                 boms.append(f"{_text(dep, 'groupId')}:{_text(dep, 'artifactId')}:{_text(dep, 'version')} ({p.rel})")
     ext = index.external_parent(pom)
     top = chain[-1].rel
-    hint = (f"Version is managed outside this repo. Add a <dependencyManagement> override for {dep_ga} "
-            f"in {top} (before any BOM import), or bump the managing BOM/parent.")
+    hint = (f"Version is managed outside this repo (BOM or external parent). Pin {dep_ga} in "
+            f"<dependencyManagement> of {top} (local entries win over imported BOMs), or bump the "
+            f"managing BOM/parent. If an external parent declares it in <dependencies> with a version, "
+            f"redeclare it with the new <version> instead.")
     return {"kind": "managed-external", "file": top, "boms": boms, "external_parent": ext, "hint": hint}
