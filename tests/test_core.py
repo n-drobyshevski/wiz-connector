@@ -220,6 +220,18 @@ class HardeningTests(unittest.TestCase):
         self.assertNotIn("curl", body)
         self.assertNotIn("evil", body)
 
+    def test_hostile_pom_values_never_reach_commands(self):
+        from wizconnector.findings import Upgrade
+        evil = Upgrade(ga="com.x:a$(curl evil)", current="1.0", target="2.0",
+                       declarations=[{"kind": "property", "file": "pom.xml", "property": "x;rm -rf /"}])
+        prop = Upgrade(ga="com.x:b", current="1.0", target="2.0",
+                       declarations=[{"kind": "property", "file": "../../etc/pom.xml", "property": "b.version"}])
+        out = "\n".join(render.fix_commands([evil, prop]))
+        self.assertNotIn("curl", out)
+        self.assertNotIn("rm -rf", out)
+        self.assertNotIn("mvn", out)
+        self.assertEqual(out.count("edit by hand"), 2)
+
     def test_ghsa_and_wiz_url_accepted(self):
         f = fnd.normalise({"cve": "GHSA-jfh8-c2jp-5v3q", "package": "a:b", "url": "https://app.wiz.io/explorer/x?y=1"})
         self.assertIsNotNone(f)
