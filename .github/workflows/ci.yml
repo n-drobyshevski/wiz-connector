@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: End-to-end on the sample Maven project (no Wiz, no agent)
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/wiz"
+          mkdir -p "$out"
+          (cd tests/fixtures/sample-project && mvn -B -ntp -q \
+            org.apache.maven.plugins:maven-dependency-plugin:3.11.0:tree \
+            -DoutputType=json -DappendOutput=true -DoutputFile="$out/dependency-tree.json")
+          python -m wizconnector deps --tree "$out/dependency-tree.json" \
+            --repo-root tests/fixtures/sample-project --out "$out/direct-deps.json"
+          python -m wizconnector report --tree "$out/dependency-tree.json" \
+            --repo-root tests/fixtures/sample-project --findings tests/fixtures/wiz-findings.json \
+            --out-dir "$out/report"
+          test "$(jq '.upgrades | length' "$out/report/report.json")" -eq 4
+          cat "$out/report/issue-body.md" >> "$GITHUB_STEP_SUMMARY"

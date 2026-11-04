@@ -1,0 +1,14 @@
+{"findings": [
+ {"cve":"CVE-2021-44228","package":"org.apache.logging.log4j:log4j-core","version":"2.14.1","fixed_versions":"2.15.0, 2.12.2, 2.3.1","severity":"CRITICAL","cvss":10.0,"has_exploit":true,"cisa_kev":true},
+ {"cve":"CVE-2021-45046","package":"org.apache.logging.log4j:log4j-core","version":"2.14.1","fixed_versions":["2.16.0","2.12.2"],"severity":"CRITICAL","cvss":9.0,"cisa_kev":true},
+ {"cve":"CVE-2021-45105","package":"log4j-core","version":"2.14.1","fixed_versions":["2.17.0","2.12.3","2.3.1"],"severity":"MEDIUM","cvss":5.9},
+ {"cve":"CVE-2021-44832","package":"pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1","version":"2.14.1","fixed_versions":["2.17.1","2.12.4","2.3.2"],"severity":"MEDIUM","cvss":6.6},
+ {"cve":"CVE-2020-36518","package":"com.fasterxml.jackson.core:jackson-databind","version":"2.9.8","fixed_versions":["2.12.6.1","2.13.2.1"],"severity":"HIGH","cvss":7.5},
+ {"cve":"CVE-2022-42003","package":"com.fasterxml.jackson.core:jackson-databind","version":"2.9.8","fixed_versions":["2.12.7.1","2.13.4.2"],"severity":"HIGH","cvss":7.5},
+ {"cve":"CVE-2022-42889","package":"org.apache.commons:commons-text","version":"1.9","fixed_versions":"1.10.0","severity":"CRITICAL","cvss":9.8},
+ {"cve":"CVE-2022-22965","package":"org.springframework:spring-beans","version":"5.3.18","fixed_versions":"5.3.18","severity":"CRITICAL","cvss":9.8,"cisa_kev":true},
+ {"cve":"CVE-2024-22262","package":"org.springframework:spring-web","version":"5.3.18","fixed_versions":"6.1.6","severity":"HIGH"},
+ {"cve":"CVE-2020-15250","package":"junit:junit","version":"4.12","fixed_versions":"4.13.1","severity":"MEDIUM","cvss":5.5},
+ {"cve":"CVE-2023-0000","package":"org.springframework:spring-webmvc","version":"5.3.18","severity":"LOW"},
+ {"cve":"CVE-2099-1","package":"lodash","version":"4.17.15","fixed_versions":"4.17.21","severity":"HIGH"}
+]}

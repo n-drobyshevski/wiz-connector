@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/n-drobyshevski/wiz-connector/schemas/wiz-findings.schema.json",
+  "title": "Wiz findings handed from the agent to wiz-connector",
+  "type": "object",
+  "required": ["findings"],
+  "properties": {
+    "error": {
+      "type": ["string", "null"],
+      "description": "Set ONLY when Wiz could not be queried or the repository is not known to Wiz. The run then fails instead of closing the issue."
+    },
+    "wiz_scope": {
+      "type": "object",
+      "description": "What was queried in Wiz, for traceability.",
+      "properties": {
+        "resource_name": {"type": ["string", "null"]},
+        "resource_id": {"type": ["string", "null"]},
+        "branch": {"type": ["string", "null"]},
+        "tool_calls": {"type": "integer"},
+        "notes": {"type": ["string", "null"]}
+      }
+    },
+    "other_findings_count": {
+      "type": "integer",
+      "description": "Open Maven findings for packages NOT in the direct dependency list (counted, not listed)."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["cve", "package", "severity"],
+        "properties": {
+          "cve": {"type": "string", "description": "CVE / GHSA id, e.g. CVE-2021-44228"},
+          "package": {"type": "string", "description": "Maven coordinates groupId:artifactId (artifactId alone if Wiz only gives that)"},
+          "version": {"type": "string", "description": "Installed version Wiz detected"},
+          "fixed_versions": {"type": "array", "items": {"type": "string"}, "description": "All fixed versions Wiz lists (one per release line); empty if none"},
+          "severity": {"type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFORMATIONAL", "UNKNOWN"]},
+          "cvss": {"type": ["number", "null"]},
+          "has_exploit": {"type": "boolean"},
+          "cisa_kev": {"type": "boolean"},
+          "url": {"type": ["string", "null"], "description": "Wiz portal link to the finding, if available"}
+        }
+      }
+    }
+  }
+}

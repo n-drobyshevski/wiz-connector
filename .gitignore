@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+target/
+wiz-report/
+direct-deps.json
+direct-deps.txt
