@@ -119,5 +119,18 @@
  },
  "after_fix": {
   "upgrades": 0
+ },
+ "auto_apply": {
+  "applied_rows": [
+   1,
+   2,
+   4,
+   6
+  ],
+  "pending_rows": [
+   3,
+   5
+  ],
+  "verify_ok": true
  }
 }

@@ -3,8 +3,9 @@
 A scheduled **GitHub Agentic Workflow** (gh-aw, engine **Copilot**) that every *N* hours asks the
 **Wiz MCP server** for open vulnerability findings on a Maven repository, keeps only the ones
 fixable by bumping a **direct** dependency (`mvn dependency:tree`), and maintains **one compact,
-Copilot-ready GitHub issue**. Developers then run `/wiz-maven-bumps <issue>` in Copilot (VS Code
-agent mode) or assign the issue to the Copilot cloud agent.
+Copilot-ready GitHub issue** plus **one automated pull request** with every bump that can be
+applied mechanically. Copilot (VS Code agent mode, `/wiz-maven-bumps <issue>`, or the cloud agent)
+only gets the rows that need judgment and any build breakage.
 
 ```
  schedule (every 6h)
@@ -16,7 +17,9 @@ agent mode) or assign the issue to the Copilot cloud agent.
    └─ safe-output job publish-wiz-report (issues: write, deterministic)
                                          resolve-deps.sh again on the same commit (trusted inventory)
                                          wizconnector report  → join, validate, pick target versions
+                                         wizconnector apply   → run the safe bumps, re-check, mvn verify
                                          wizconnector publish → create / update / close ONE issue
+                                         wizconnector pr      → one PR on wiz-connector/maven-bumps
 ```
 
 The LLM only fetches data. Joining, version selection, rendering and issue writes are plain,
@@ -57,6 +60,28 @@ git diff --stat ; mvn -B -ntp verify ; mvn ... maven-dependency-plugin:3.11.0:tr
 - Everything Copilot needs is visible Markdown; the hidden `<!-- wiz-connector:... fingerprint=... -->`
   marker is only used for de-duplication.
 
+## Automated PR
+The publish job runs the same command plan the issue shows (as argument lists, no shell), for rows
+that are safe to automate: literal `<version>`s and properties used only by the vulnerable artifact,
+up to `WIZ_AUTO_PR_MAX_BUMP`. It then re-resolves the tree to confirm each row reached its target in
+every module, runs `mvn -B -ntp verify`, and commits **only the changed `pom.xml` files** to
+`wiz-connector/maven-bumps` as `github-actions[bot]`.
+
+| Situation | What happens |
+|---|---|
+| bumps applied, build green | PR ready for review; `Fixes #issue` when nothing is left for Copilot |
+| build fails | PR is a **draft** with the build-log tail; Copilot fixes the breakage on the branch |
+| rows need judgment (external BOM/parent, shared property, above max bump) | marked `Copilot` in the issue's **Status** column; Copilot pushes them to the same branch |
+| a person or Copilot pushed to the branch | the bot stops rewriting it |
+| same result as last run | nothing is pushed |
+| nothing left to apply | the bot's PR is closed and its branch deleted |
+
+Settings (top-level `env:` of the workflow): `WIZ_AUTO_PR: "false"` turns it off (issue only),
+`WIZ_AUTO_PR_MAX_BUMP: minor` keeps major bumps for Copilot. Requirements: *Settings › Actions ›
+General › Allow GitHub Actions to create and approve pull requests*. Pushes made with `GITHUB_TOKEN`
+do not trigger other workflows, so CI does not run on the PR; add a `WIZ_PR_TOKEN` secret (fine-grained
+PAT or GitHub App token with contents and pull-requests write) to get CI on it.
+
 ## Install in a Maven repository
 
 ### 1. Wiz
@@ -74,6 +99,7 @@ Details and sources: [docs/wiz-mcp.md](docs/wiz-mcp.md).
 |---|---|
 | `WIZ_CLIENT_ID`, `WIZ_CLIENT_SECRET`, `WIZ_DATACENTER` | from step 1 |
 | `COPILOT_GITHUB_TOKEN` | only without org-billed Copilot CLI: fine-grained PAT of a Copilot-licensed user, *Account › Copilot Requests: Read*; then remove `copilot-requests: write` from the workflow |
+| `WIZ_PR_TOKEN` | optional: token used to push the bump branch and open the PR, so CI runs on it |
 
 ### 3. Workflow
 ```bash
@@ -128,7 +154,10 @@ Also set the org-wide Copilot model policy (it covers Copilot in VS Code too), a
 `.github/agents/*.agent.md` files naming Claude models, and check runs with `gh aw audit <run-url> --models`.
 
 ## Safety model
-- The agent job is read-only and firewalled; only the `publish-wiz-report` job has `issues: write`.
+- The agent job is read-only and firewalled; only the `publish-wiz-report` job has write
+  permissions (`issues`, `pull-requests`, and `contents` to push the bump branch).
+- The automated PR contains only `pom.xml` changes produced by validated versions-maven-plugin
+  commands; the bot never force-pushes over commits made by anyone else.
 - The agent can write `/tmp/gh-aw/agent/`, so the publish job takes only `findings.json` from it and
   rebuilds the dependency inventory itself from the same commit.
 - The publish job bypasses gh-aw's sanitizer, so the Python validates every value: CVE/GHSA ids,

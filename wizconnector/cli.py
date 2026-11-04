@@ -141,8 +141,11 @@ def cmd_report(a) -> None:
     data = render.payload(res, a.repo, a.ref, now, a.run_url, maven)
     (out / "report.json").write_text(json.dumps(data, indent=1), encoding="utf-8")
     (out / "issue-title.txt").write_text(render.title(res, a.title_prefix), encoding="utf-8")
+    apply_result = None
+    if a.apply_result and Path(a.apply_result).is_file():
+        apply_result = json.loads(Path(a.apply_result).read_text(encoding="utf-8"))
     (out / "issue-body.md").write_text(
-        render.body(res, a.repo, a.ref, now, a.run_url, a.verify_cmd, maven), encoding="utf-8")
+        render.body(res, a.repo, a.ref, now, a.run_url, a.verify_cmd, maven, apply_result), encoding="utf-8")
     summary = (f"{res.total_findings} Wiz findings -> {len(res.upgrades)} direct upgrades "
                f"({sum(len(u.cves) for u in res.upgrades)} CVEs); excluded: "
                f"{sum(len(v) for v in res.skipped_transitive.values())} transitive, "
@@ -167,12 +170,44 @@ def cmd_publish(a) -> None:
         trusted_authors=tuple(x.strip() for x in a.trusted_author.split(",") if x.strip()) or pub.DEFAULT_TRUSTED_AUTHORS,
     )
     mode = " (dry run)" if a.dry_run or staged else ""
+    (out / "issue.json").write_text(json.dumps({"action": p.action, "number": p.number}), encoding="utf-8")
     print(f"issue action: {p.action} #{p.number or '-'}{mode}")
     _gh_output(issue_action=p.action, issue_number=p.number or "")
     _summary(f"issue action: **{p.action}** #{p.number or '-'}{mode}")
     if a.dry_run or staged:
         _summary("<details><summary>Rendered issue</summary>\n\n"
                  + (out / "issue-body.md").read_text(encoding="utf-8") + "\n</details>")
+
+
+def cmd_apply(a) -> None:
+    from . import apply as applymod
+    res = applymod.main(a.out_dir, a.repo_root, a.maven_dir, a.verify_cmd, a.max_bump)
+    v = res["verify"]
+    summary = (f"auto-apply: rows {res['applied_rows'] or '-'} applied, {len(res['pending'])} left; build "
+               + ("not run" if not v["ran"] else "passed" if v["ok"] else "FAILED"))
+    if res.get("error"):
+        summary += f"; error: {res['error'].splitlines()[0][:200]}"
+    print(summary)
+    _gh_output(applied_count=len(res["applied_rows"]), verify_ok=str(v["ok"]).lower())
+    _summary(summary)
+
+
+def cmd_pr(a) -> None:
+    from . import pr as prmod
+    try:
+        o = prmod.main(a.repo, a.repo_root, a.out_dir, a.issue_number, a.base,
+                       [x for x in a.label.split(",") if x], a.dry_run)
+    except RuntimeError as exc:
+        # the tracking issue is already published; a failed PR must not fail the whole run
+        print(f"::warning::automated PR not updated: {exc}")
+        _summary(f"automated PR not updated: {exc}")
+        return
+    line = f"automated PR: {o.action} #{o.number or '-'}" + (f" ({o.detail})" if o.detail and o.action != "dry-run" else "")
+    print(line)
+    _gh_output(pr_action=o.action, pr_number=o.number or "")
+    _summary(line)
+    if o.action == "dry-run":
+        _summary("<details><summary>Rendered PR body</summary>\n\n" + o.detail + "\n</details>")
 
 
 def main(argv=None) -> None:
@@ -202,7 +237,26 @@ def main(argv=None) -> None:
     r.add_argument("--maven-version-file", default=None)
     r.add_argument("--title-prefix", default="[wiz-sca]")
     r.add_argument("--verify-cmd", default="mvn -B -ntp verify")
+    r.add_argument("--apply-result", default=None, help="apply-result.json from `apply` (adds PR status)")
     r.set_defaults(fn=cmd_report)
+
+    ap_ = sub.add_parser("apply", help="run the safe fix commands, re-check versions, run the build")
+    ap_.add_argument("--out-dir", default="wiz-report")
+    ap_.add_argument("--repo-root", default=".")
+    ap_.add_argument("--maven-dir", default=".")
+    ap_.add_argument("--verify-cmd", default="mvn -B -ntp verify")
+    ap_.add_argument("--max-bump", choices=["patch", "minor", "major"], default="major")
+    ap_.set_defaults(fn=cmd_apply)
+
+    pq = sub.add_parser("pr", help="commit the applied POM changes and create/update the bump PR")
+    pq.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
+    pq.add_argument("--repo-root", default=".")
+    pq.add_argument("--out-dir", default="wiz-report")
+    pq.add_argument("--issue-number", default=None)
+    pq.add_argument("--base", default=os.environ.get("GITHUB_REF_NAME", "main"))
+    pq.add_argument("--label", default="wiz-sca,dependencies")
+    pq.add_argument("--dry-run", action="store_true")
+    pq.set_defaults(fn=cmd_pr)
 
     p = sub.add_parser("publish", help="create/update/replace/close the tracking issue via gh")
     p.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))

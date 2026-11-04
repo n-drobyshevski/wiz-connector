@@ -34,6 +34,8 @@ concurrency:
 
 env:
   MAVEN_DIR: "."              # directory of the root (reactor) pom.xml, relative to the repo root
+  WIZ_AUTO_PR: "true"         # apply safe bumps and open/update one PR; "false" = issue only
+  WIZ_AUTO_PR_MAX_BUMP: major # patch | minor | major: highest bump applied automatically
 
 # Declaring checkouts here keeps gh-aw's default checkout of this repository; an actions/checkout
 # inside steps: would silently replace it.
@@ -92,16 +94,18 @@ safe-outputs:
   jobs:
     publish-wiz-report:
       description: >-
-        Join the Wiz findings with the direct Maven dependencies and create, update or close the single
-        tracking issue. Call exactly once, after writing /tmp/gh-aw/agent/wiz/findings.json.
+        Join the Wiz findings with the direct Maven dependencies, create, update or close the single
+        tracking issue, and open the automated bump PR. Call exactly once, after writing
+        /tmp/gh-aw/agent/wiz/findings.json.
       runs-on: ubuntu-latest
       max: 1
-      output: Tracking issue reconciled
+      output: Tracking issue and bump PR reconciled
       artifacts:
         - /tmp/gh-aw/agent/wiz/
       permissions:
-        contents: read
+        contents: write           # push the wiz-connector/maven-bumps branch (pom.xml changes only)
         issues: write
+        pull-requests: write
       inputs:
         summary:
           description: One line, e.g. "findings=12 other=40"
@@ -134,21 +138,40 @@ safe-outputs:
             cache: maven
         - name: Rebuild the dependency inventory (trusted)
           run: bash .wiz-connector/scripts/resolve-deps.sh "$RUNNER_TEMP/wiz-inventory"
-        - name: Join, render and publish
+        - name: Join, render, auto-apply and publish
           env:
             GH_TOKEN: ${{ github.token }}
+            # A PAT or GitHub App token makes CI run on the bump PR (GITHUB_TOKEN pushes do not
+            # trigger workflows). Falls back to GITHUB_TOKEN.
+            PR_TOKEN: ${{ secrets.WIZ_PR_TOKEN || github.token }}
             GH_AW_AGENT_OUTPUT: ${{ runner.temp }}/gh-aw/safe-jobs/agent_output.json
+            # custom jobs do not inherit staged mode: pass it explicitly (dry run of issue + PR)
+            GH_AW_SAFE_OUTPUTS_STAGED: ${{ github.event_name == 'workflow_dispatch' && inputs.staged }}
             RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           run: |
             set -euo pipefail
             INV="$RUNNER_TEMP/wiz-inventory"
+            R="$RUNNER_TEMP/wiz-report"
             export PYTHONPATH="$GITHUB_WORKSPACE/.wiz-connector"
-            python3 -m wizconnector report \
-              --deps "$INV/direct-deps.json" --maven-version-file "$INV/maven-version.txt" \
-              --findings "$(dirname "$GH_AW_AGENT_OUTPUT")/agent/wiz/findings.json" \
-              --agent-output "$GH_AW_AGENT_OUTPUT" \
-              --run-url "$RUN_URL" --out-dir "$RUNNER_TEMP/wiz-report"
-            python3 -m wizconnector publish --out-dir "$RUNNER_TEMP/wiz-report" --label wiz-sca
+            report() {
+              python3 -m wizconnector report \
+                --deps "$INV/direct-deps.json" --maven-version-file "$INV/maven-version.txt" \
+                --findings "$(dirname "$GH_AW_AGENT_OUTPUT")/agent/wiz/findings.json" \
+                --agent-output "$GH_AW_AGENT_OUTPUT" --maven-dir "$MAVEN_DIR" \
+                --run-url "$RUN_URL" --out-dir "$R" "$@"
+            }
+            report
+            if [ "$WIZ_AUTO_PR" = "true" ]; then
+              # deterministic: the same command plan the issue shows, run without a shell
+              python3 -m wizconnector apply --out-dir "$R" --repo-root . --maven-dir "$MAVEN_DIR" \
+                --max-bump "$WIZ_AUTO_PR_MAX_BUMP" || echo "::warning::auto-apply failed; issue only"
+              [ -f "$R/apply-result.json" ] && report --apply-result "$R/apply-result.json"
+            fi
+            python3 -m wizconnector publish --out-dir "$R" --label wiz-sca
+            if [ "$WIZ_AUTO_PR" = "true" ]; then
+              git remote set-url origin "https://x-access-token:${PR_TOKEN}@${GITHUB_SERVER_URL#https://}/${GITHUB_REPOSITORY}.git"
+              GH_TOKEN="$PR_TOKEN" python3 -m wizconnector pr --out-dir "$R" --repo-root . --base "$GITHUB_REF_NAME"
+            fi
 ---
 
 # Wiz → direct Maven dependency bumps

@@ -2,7 +2,8 @@
 # Live end-to-end check on test-repo/ (needs JDK 17+, Maven, network to Maven Central):
 #   1. resolve the dependency tree with the workflow's own script and compare with the golden test
 #   2. render the issue from the sample Wiz findings
-#   3. run the issue's fix commands, then make the "edit by hand" changes the way Copilot would
+#   3. auto-apply the safe rows exactly as the workflow's publish job does (wizconnector apply),
+#      then make the "edit by hand" changes the way Copilot would
 #   4. mvn verify, re-resolve, re-report: nothing actionable may be left (the issue would close)
 set -euo pipefail
 
@@ -24,13 +25,20 @@ python3 -m wizconnector report --deps "$WORK/before/direct-deps.json" --findings
   --out-dir "$WORK/report"
 echo "::endgroup::"
 
-echo "::group::3. apply fix commands + manual edits"
+echo "::group::3. auto-apply (as the publish job does) + manual edits (as Copilot would)"
+(cd "$WORK/app" && git init -q && git add -A && git -c user.email=ci@example.invalid -c user.name=ci commit -qm base)
+python3 -m wizconnector apply --out-dir "$WORK/report" --repo-root "$WORK/app"
+python3 -c '
+import json, sys
+got = json.load(open(sys.argv[1]))
+want = json.load(open(sys.argv[2]))["auto_apply"]
+assert got["applied_rows"] == want["applied_rows"], (got["applied_rows"], want)
+assert sorted(map(int, got["pending"])) == want["pending_rows"], got["pending"]
+assert got["verify"]["ok"] is want["verify_ok"], got["verify"]
+print("auto-apply matches expected.json:", got["applied_rows"])
+' "$WORK/report/apply-result.json" "$HERE/test-repo/expected.json"
 cd "$WORK/app"
-git init -q && git add -A && git -c user.email=ci@example.invalid -c user.name=ci commit -qm base
-sed -n '/^```bash$/,/^```$/p' "$WORK/report/issue-body.md" | sed '1d;$d' | grep -v '^#' > "$WORK/fix.sh"
-cat "$WORK/fix.sh"
-bash -e "$WORK/fix.sh" > "$WORK/fix.log" 2>&1 || { tail -60 "$WORK/fix.log"; exit 1; }
-# the two rows the issue marks "edit by hand"
+# the two rows left for Copilot ("edit by hand")
 python3 - <<'EOF'
 import re
 p = "pom.xml"

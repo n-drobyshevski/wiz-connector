@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 
+from . import commands as cmdmod
 from . import mvnversion as mv
 from .findings import Result, Upgrade
 
@@ -21,24 +22,14 @@ MARKER = "wiz-connector:maven-direct-vulns"
 SCHEMA = "wiz-connector/maven-upgrades@v1"
 MAX_BODY = 60_000            # GitHub limit is 65,536; gh-aw's is 65,000
 TABLE_CVES = 3
-VERSIONS_PLUGIN = "org.codehaus.mojo:versions-maven-plugin:2.23.0"
-DEPENDENCY_PLUGIN = "org.apache.maven.plugins:maven-dependency-plugin:3.11.0"
 SKILL = "wiz-maven-bumps"
+PR_BRANCH = "wiz-connector/maven-bumps"
 
-# POM-derived strings end up in shell commands a coding agent will run: allow only plain tokens.
-_SAFE_COORD = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*:[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
-_SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-+]{0,63}$")
-_SAFE_PROP = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]{0,127}$")
-_SAFE_PATH = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./\-]{0,255}$")
-
-
-def _ok(regex: re.Pattern, value) -> bool:
-    return isinstance(value, str) and bool(regex.match(value)) and ".." not in value.split("/")
-
-
-def _md(value) -> str:
-    """Neutralise characters that could break out of a Markdown code span / table cell."""
-    return str(value).replace("`", "'").replace("|", "/").replace("\n", " ").replace("\r", " ").replace("<", "&lt;").replace(">", "&gt;")
+# shared with the apply step (wizconnector.commands); aliases kept for older imports
+VERSIONS_PLUGIN, DEPENDENCY_PLUGIN = cmdmod.VERSIONS_PLUGIN, cmdmod.DEPENDENCY_PLUGIN
+_SAFE_COORD, _SAFE_VERSION, _SAFE_PROP, _SAFE_PATH = (cmdmod.SAFE_COORD, cmdmod.SAFE_VERSION,
+                                                      cmdmod.SAFE_PROP, cmdmod.SAFE_PATH)
+_ok, _md, edit_hint = cmdmod.ok, cmdmod.md, cmdmod.edit_hint
 
 
 def fingerprint(result: Result) -> str:
@@ -61,23 +52,6 @@ def compact_json(data: dict) -> str:
     return "{\n" + ",\n".join(lines) + "\n}"
 
 
-def edit_hint(decl: dict) -> str:
-    k = decl.get("kind")
-    f, prop = _md(decl.get("file", "pom.xml")), _md(decl.get("property", ""))
-    if k == "literal":
-        sec = " (dependencyManagement)" if decl.get("section") == "dependencyManagement" else ""
-        return f"`{f}` `<version>`{sec}"
-    if k == "property":
-        return f"`{f}` `<{prop}>`"
-    if k == "external-property":
-        return f"add `<{prop}>` to `<properties>` of `{f}`"
-    if k == "managed-external":
-        return f"pin in `<dependencyManagement>` of `{f}`"
-    if k == "project-version":
-        return f"`{f}` uses `${{project.version}}`"
-    return "locate declaration"
-
-
 def _edits(u: Upgrade) -> list[dict]:
     seen, out = set(), []
     for d in u.declarations:
@@ -88,52 +62,16 @@ def _edits(u: Upgrade) -> list[dict]:
     return out
 
 
-def fix_commands(ups: list[Upgrade]) -> list[str]:
+def row_of(u: Upgrade) -> dict:
+    return {"ga": u.ga, "current": u.current, "target": u.target, "bump": u.bump,
+            "edit": _edits(u), "shared_with": u.shared_with}
+
+
+def fix_commands(ups: list[Upgrade], applied_rows: set[int] | None = None) -> list[str]:
     """One command per property / literal coordinate; a property is bumped once, to the highest
     target of the rows using it. Anything unusual becomes an "edit by hand" comment."""
-    from . import mvnversion as mv
-
-    props: dict[str, dict] = {}
-    lines: list[str] = []
-    manual: list[str] = []
-    literal_done: set[str] = set()
-    for i, u in enumerate(ups, 1):
-        safe = _ok(_SAFE_COORD, u.ga) and _ok(_SAFE_VERSION, u.target) and _ok(_SAFE_VERSION, u.current)
-        for d in _edits(u):
-            kind = d.get("kind")
-            if not safe or not _ok(_SAFE_PATH, d.get("file", "pom.xml")) or (
-                    kind in ("property", "external-property") and not _ok(_SAFE_PROP, d.get("property"))):
-                manual.append(f"# {i}. row {i}: edit by hand (unusual characters in its POM declaration)")
-                continue
-            if kind == "property":
-                p = props.setdefault(d["property"], {"target": u.target, "files": set(), "rows": set(), "shared": set()})
-                if mv.compare(u.target, p["target"]) > 0:
-                    p["target"] = u.target
-                p["files"].add(d["file"])
-                p["rows"].add(u.ga)
-                p["shared"].update(u.shared_with)
-            elif kind == "literal" and u.ga not in literal_done:
-                literal_done.add(u.ga)
-                lines.append(f"# {i}. {u.ga.split(':')[1]} {u.current} -> {u.target} ({d['file']})")
-                lines.append(f"mvn -B -ntp {VERSIONS_PLUGIN}:use-dep-version -Dincludes={u.ga} "
-                             f"-DdepVersion={u.target} -DprocessProperties=true -DgenerateBackupPoms=false")
-            elif kind in ("external-property", "managed-external", "project-version", "unknown"):
-                manual.append(f"# {i}. {u.ga.split(':')[1]} -> {u.target}: edit by hand, {_plain(edit_hint(d))}")
-    for prop, p in sorted(props.items()):
-        others = sorted(p["shared"] - p["rows"])
-        lines.append(f"# property {prop} ({', '.join(sorted(p['files']))}) -> {p['target']}"
-                     f" for {', '.join(g.split(':')[1] for g in sorted(p['rows']))}")
-        if others:
-            lines.append(f"#   SHARED with {', '.join(g.split(':')[1] for g in others)}: {p['target']} must exist for them"
-                         " too (micro-patches such as jackson-databind 2.12.7.1 do not); otherwise use the next"
-                         " common release, or pin the vulnerable artifact with use-dep-version instead")
-        lines.append(f"mvn -B -ntp {VERSIONS_PLUGIN}:set-property -Dproperty={prop} "
-                     f"-DnewVersion={p['target']} -DgenerateBackupPoms=false")
-    return lines + manual
-
-
-def _plain(text: str) -> str:
-    return text.replace("`", "")
+    cmds, manual = cmdmod.plan([row_of(u) for u in ups])
+    return cmdmod.render_lines(cmds, manual, applied_rows)
 
 
 def _sev(u: Upgrade) -> str:
@@ -200,9 +138,22 @@ def title(result: Result, prefix: str) -> str:
     return f"{prefix} {n} direct Maven dependenc{'y' if n == 1 else 'ies'} to bump ({cves} CVEs)"
 
 
+def automation(apply_result: dict | None, result: Result) -> dict | None:
+    """Status of the automated PR, embedded in the issue (only when it matches these findings)."""
+    if not apply_result or apply_result.get("fingerprint") != fingerprint(result):
+        return None
+    return {"branch": PR_BRANCH,
+            "applied_rows": [int(i) for i in apply_result.get("applied_rows", [])],
+            "pending": {str(k): str(v) for k, v in apply_result.get("pending", {}).items()},
+            "verify_ok": (apply_result.get("verify") or {}).get("ok")}
+
+
 def body(result: Result, repo: str, ref: str | None, generated_at: str, run_url: str | None,
-         verify_cmd: str = "mvn -B -ntp verify", maven: str | None = None) -> str:
+         verify_cmd: str = "mvn -B -ntp verify", maven: str | None = None, apply_result: dict | None = None) -> str:
     data = payload(result, repo, ref, generated_at, run_url, maven)
+    auto = automation(apply_result, result)
+    if auto and auto["applied_rows"]:
+        data["automation"] = auto
     ups = list(result.upgrades)
     text = _body(ups, data, verify_cmd)
     # progressively shrink until it fits the body limit
@@ -248,26 +199,45 @@ def _body(ups: list[Upgrade], data: dict, verify_cmd: str) -> str:
         f"**Goal:** bump {len(ups)} direct Maven dependenc{'y' if len(ups) == 1 else 'ies'} to fix {n_cves} CVEs"
         f" ({n_crit} critical, {n_kev} CISA-KEV). Only direct dependencies are listed: each row is fixed by editing one version declaration.",
         "",
-        f"**Copilot:** in VS Code agent mode run `/{SKILL} <this issue URL>`, or assign this issue to Copilot.",
-        "",
-        "| # | Dependency | Bump | Severity | CVEs | Edit |",
-        "|--:|---|---|---|---|---|",
     ]
+    auto = data.get("automation")
+    applied = set(auto["applied_rows"]) if auto else set()
+    if auto:
+        left = [i for i in range(1, len(ups) + 1) if i not in applied]
+        build = {True: "build passes", False: "**build fails** (PR is a draft)", None: "build not run"}[auto["verify_ok"]]
+        lines += [
+            f"**Automated PR** (branch `{auto['branch']}`): rows {', '.join(map(str, sorted(applied)))} applied, {build}.",
+            f"**Copilot:** " + (f"do rows {', '.join(map(str, left))} on top of branch `{auto['branch']}`"
+                                if left else f"only fix the build on branch `{auto['branch']}`" if auto["verify_ok"] is False
+                                else "nothing left; review and merge the automated PR")
+            + f" (VS Code agent mode: `/{SKILL} <this issue URL>`).",
+            "",
+            "| # | Dependency | Bump | Severity | CVEs | Edit | Status |",
+            "|--:|---|---|---|---|---|---|",
+        ]
+    else:
+        lines += [
+            f"**Copilot:** in VS Code agent mode run `/{SKILL} <this issue URL>`, or assign this issue to Copilot.",
+            "",
+            "| # | Dependency | Bump | Severity | CVEs | Edit |",
+            "|--:|---|---|---|---|---|",
+        ]
     for i, u in enumerate(ups, 1):
         edits = "<br>".join(edit_hint(d) for d in _edits(u)) or "locate declaration"
         if u.shared_with:
             edits += " (shared property)"
         others = sorted(set(u.module_versions.values()) - {u.current}, key=mv.sort_key)
         cur = f"`{_md(u.current)}`" + (f" (also {', '.join('`' + _md(v) + '`' for v in others)})" if others else "")
+        status = (" PR |" if i in applied else " Copilot |") if auto else ""
         lines.append(
-            f"| {i} | `{_md(u.ga)}` | {cur} → `{_md(u.target)}` ({u.bump}) | {_sev(u)} | {_cve_cell(u)} | {edits} |"
+            f"| {i} | `{_md(u.ga)}` | {cur} → `{_md(u.target)}` ({u.bump}) | {_sev(u)} | {_cve_cell(u)} | {edits} |{status}"
         )
     lines += [
         "",
         "### Fix commands (bash, from the repository root)",
         "```bash",
         *([f"cd {mdir}"] if mdir != "." and mdir_ok else []),
-        *fix_commands(ups),
+        *fix_commands(ups, applied if auto else None),
         "git diff --stat   # versions-maven-plugin only WARNs when a version is managed elsewhere: every Edit file must change",
         verify_cmd,
         f"mvn -B -ntp {DEPENDENCY_PLUGIN}:tree -Dincludes={gas}",
