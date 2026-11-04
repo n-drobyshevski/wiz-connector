@@ -12,8 +12,8 @@ exactly as Wiz returns them and never invent CVEs, versions or fixes.
 ## Wiz MCP: how the tools are exposed
 The `wiz` server normally runs in **Gateway mode**: it exposes only `discover` (find the
 right Wiz tool by describing what you need) and `execute` (run the tool `discover` returned,
-with its arguments). If Gateway mode is off, the same Wiz tools are callable directly as
-`mcp__wiz__<tool_name>`. Either way, ask for these Wiz tools **by name**:
+with its arguments). If Gateway mode is off, the same Wiz tools are exposed directly under
+their own names. Either way, ask for these Wiz tools **by name**:
 
 | Step | Wiz tool | Use |
 |---|---|---|
