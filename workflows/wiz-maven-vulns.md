@@ -1,13 +1,36 @@
 ---
-description: Every 6h, fetch open Wiz vulnerability findings for this repo, keep only DIRECT Maven dependencies we can bump, and maintain one compact Copilot-ready tracking issue
+description: Every 6h, fetch open Wiz vulnerability findings for this repo, keep only DIRECT Maven dependencies we can bump, and maintain one compact Copilot-ready tracking issue plus one automated bump PR
 on:
+  # Run time: change with `scripts/setup.sh --schedule "daily around 9am on weekdays"` (or
+  # --cron "30 7 * * 1-5" --timezone Europe/Paris), which rewrites this line and recompiles.
   schedule: every 6h
+  # Manual run: Actions > wiz-maven-vulns > Run workflow (or `gh aw run wiz-maven-vulns`).
+  # "default" falls back to the repository variables, then to the built-in defaults.
   workflow_dispatch:
     inputs:
       staged:
-        description: Dry run (render the issue in the job summary, do not touch issues)
+        description: Dry run (issue and PR rendered in the job summary, nothing written)
         type: boolean
         default: false
+      auto_pr:
+        description: Open/update the automated bump PR
+        type: choice
+        options: [default, "true", "false"]
+        default: default
+      max_bump:
+        description: Highest bump applied automatically
+        type: choice
+        options: [default, patch, minor, major]
+        default: default
+      min_severity:
+        description: Lowest severity listed (CISA-KEV findings are always listed)
+        type: choice
+        options: [default, LOW, MEDIUM, HIGH, CRITICAL]
+        default: default
+  # Re-run from the tracking issue: comment `/wiz-scan` (users with write access or above).
+  slash_command:
+    name: wiz-scan
+    events: [issue_comment]
 
 permissions:
   contents: read
@@ -32,10 +55,14 @@ concurrency:
   group: wiz-maven-vulns-${{ github.repository }}
   cancel-in-progress: false
 
+# Settings come from repository variables (Settings > Secrets and variables > Actions > Variables),
+# so they change without recompiling. `scripts/setup.sh` sets them for you.
 env:
-  MAVEN_DIR: "."              # directory of the root (reactor) pom.xml, relative to the repo root
-  WIZ_AUTO_PR: "true"         # apply safe bumps and open/update one PR; "false" = issue only
-  WIZ_AUTO_PR_MAX_BUMP: major # patch | minor | major: highest bump applied automatically
+  MAVEN_DIR: ${{ vars.WIZ_MAVEN_DIR || '.' }}                    # reactor root, relative to the repo root
+  WIZ_AUTO_PR: ${{ (inputs.auto_pr != 'default' && inputs.auto_pr) || vars.WIZ_AUTO_PR || 'true' }}  # "false" = issue only
+  WIZ_AUTO_PR_MAX_BUMP: ${{ (inputs.max_bump != 'default' && inputs.max_bump) || vars.WIZ_AUTO_PR_MAX_BUMP || 'major' }}
+  WIZ_MIN_SEVERITY: ${{ (inputs.min_severity != 'default' && inputs.min_severity) || vars.WIZ_MIN_SEVERITY || 'LOW' }}
+  WIZ_ISSUE_LABEL: ${{ vars.WIZ_ISSUE_LABEL || 'wiz-sca' }}
 
 # Declaring checkouts here keeps gh-aw's default checkout of this repository; an actions/checkout
 # inside steps: would silently replace it.
@@ -158,7 +185,7 @@ safe-outputs:
                 --deps "$INV/direct-deps.json" --maven-version-file "$INV/maven-version.txt" \
                 --findings "$(dirname "$GH_AW_AGENT_OUTPUT")/agent/wiz/findings.json" \
                 --agent-output "$GH_AW_AGENT_OUTPUT" --maven-dir "$MAVEN_DIR" \
-                --run-url "$RUN_URL" --out-dir "$R" "$@"
+                --min-severity "$WIZ_MIN_SEVERITY" --run-url "$RUN_URL" --out-dir "$R" "$@"
             }
             report
             if [ "$WIZ_AUTO_PR" = "true" ]; then
@@ -167,10 +194,11 @@ safe-outputs:
                 --max-bump "$WIZ_AUTO_PR_MAX_BUMP" || echo "::warning::auto-apply failed; issue only"
               [ -f "$R/apply-result.json" ] && report --apply-result "$R/apply-result.json"
             fi
-            python3 -m wizconnector publish --out-dir "$R" --label wiz-sca
+            python3 -m wizconnector publish --out-dir "$R" --label "$WIZ_ISSUE_LABEL"
             if [ "$WIZ_AUTO_PR" = "true" ]; then
               git remote set-url origin "https://x-access-token:${PR_TOKEN}@${GITHUB_SERVER_URL#https://}/${GITHUB_REPOSITORY}.git"
-              GH_TOKEN="$PR_TOKEN" python3 -m wizconnector pr --out-dir "$R" --repo-root . --base "$GITHUB_REF_NAME"
+              GH_TOKEN="$PR_TOKEN" python3 -m wizconnector pr --out-dir "$R" --repo-root . \
+                --base "$GITHUB_REF_NAME" --label "$WIZ_ISSUE_LABEL,dependencies"
             fi
 ---
 

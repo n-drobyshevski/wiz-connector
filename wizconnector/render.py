@@ -128,6 +128,7 @@ def payload(result: Result, repo: str, ref: str | None, generated_at: str, run_u
             "already_fixed": result.already_fixed,
             "not_in_maven_tree": result.unmatched,
             "rejected_records": result.rejected,
+            "below_min_severity": result.below_threshold,
         },
     }
 
@@ -249,6 +250,8 @@ def _body(ups: list[Upgrade], data: dict, verify_cmd: str) -> str:
         "- `major`/`minor` bumps: check release notes; fix only compile/test breakage caused by the bump.",
         "- One PR titled `fix(deps): security bumps from Wiz`, listing the CVEs fixed and `Fixes` this issue.",
         "",
+        "Re-run now: comment `/wiz-scan` on this issue, or *Actions › wiz-maven-vulns › Run workflow*.",
+        "",
         "### Acceptance criteria",
     ]
     for u in ups:
@@ -268,6 +271,10 @@ def _body(ups: list[Upgrade], data: dict, verify_cmd: str) -> str:
         excluded_lines.append("- **Already fixed in current tree** (stale Wiz data): " + ", ".join(f"`{_md(g)}`" for g in ex["already_fixed"]))
     if ex.get("not_in_maven_tree"):
         excluded_lines.append(f"- **Not in the Maven tree** (other ecosystem/branch): {len(ex['not_in_maven_tree'])} packages")
+    if ex.get("below_min_severity"):
+        n = sum(len(v) for v in ex["below_min_severity"].values())
+        excluded_lines.append(f"- **Below the minimum severity** (`WIZ_MIN_SEVERITY`): {n} CVEs in "
+                              + ", ".join(f"`{_md(g)}`" for g in ex["below_min_severity"]))
     if ex.get("rejected_records"):
         excluded_lines.append(f"- **Rejected:** {ex['rejected_records']} malformed Wiz records")
     if ex.get("truncated"):

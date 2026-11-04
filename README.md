@@ -76,13 +76,34 @@ every module, runs `mvn -B -ntp verify`, and commits **only the changed `pom.xml
 | same result as last run | nothing is pushed |
 | nothing left to apply | the bot's PR is closed and its branch deleted |
 
-Settings (top-level `env:` of the workflow): `WIZ_AUTO_PR: "false"` turns it off (issue only),
-`WIZ_AUTO_PR_MAX_BUMP: minor` keeps major bumps for Copilot. Requirements: *Settings › Actions ›
+Settings (repository variables, see below): `WIZ_AUTO_PR=false` turns it off (issue only),
+`WIZ_AUTO_PR_MAX_BUMP=minor` keeps major bumps for Copilot. Requirements: *Settings › Actions ›
 General › Allow GitHub Actions to create and approve pull requests*. Pushes made with `GITHUB_TOKEN`
 do not trigger other workflows, so CI does not run on the PR; add a `WIZ_PR_TOKEN` secret (fine-grained
 PAT or GitHub App token with contents and pull-requests write) to get CI on it.
 
 ## Install in a Maven repository
+
+### Quick setup (one command)
+After the Wiz part below, from inside the target repository (with a local clone of wiz-connector):
+```bash
+gh extension install github/gh-aw                                   # once, v1.0.1+
+bash ../wiz-connector/scripts/setup.sh                              # interactive
+# or non-interactive:
+bash ../wiz-connector/scripts/setup.sh --yes --schedule "daily around 9am on weekdays" \
+     --datacenter us17 --max-bump minor --commit                    # WIZ_CLIENT_ID/SECRET from env
+bash ../wiz-connector/scripts/setup.sh --doctor                     # check everything, any time
+```
+`setup.sh` does the following:
+- installs the workflow (`gh aw add`, or `--local` to copy it from the clone) and sets the run time;
+- with `--on-pom-change`, also runs on `pom.xml` pushes;
+- compiles the workflow, copies the Copilot files and sets the repository variables;
+- asks only for missing secrets, tests them against Wiz before saving, and passes them through stdin;
+- allows GitHub Actions to open pull requests, keeping your default token permission;
+- creates the label, and commits with `--commit`.
+
+`--doctor` lists what is missing or misconfigured and shows the last runs. The manual steps below
+do the same by hand.
 
 ### 1. Wiz
 1. Settings › Tenant › AI Features: enable the remote Wiz MCP server.
@@ -130,14 +151,32 @@ on Copilot Business/Enterprise the "MCP servers in Copilot" policy must be enabl
 remote MCP servers in Copilot-harness sessions has an open bug (microsoft/vscode#339960): start the
 server from *MCP: List Servers* and sign in there.
 
-## Configuration
+## Run time, manual runs and settings
 
+### When it runs
+| Trigger | How |
+|---|---|
+| Schedule | `setup.sh --schedule "<gh-aw schedule>"`: `every 6h` (default), `every 12h on weekdays`, `daily around 9am on weekdays`, `daily between 22:00 and 02:00`, `weekly on monday` (fuzzy, UTC). Fixed time in your zone: `--cron "30 7 * * 1-5" --timezone Europe/Paris`. The run time is the one setting that needs a recompile, which setup.sh does |
+| Manual | *Actions › wiz-maven-vulns › Run workflow*: tick **staged** for a dry run, and override *auto_pr*, *max_bump* or *min_severity* for this run only. CLI: `gh aw run wiz-maven-vulns` |
+| From the issue | comment `/wiz-scan` on the tracking issue (users with write access or above); gh-aw reacts and posts a status comment with the run link |
+| After dependency changes | `setup.sh --on-pom-change [branch]` adds a push trigger on `**/pom.xml`, so the issue and PR refresh right after a merge (each run is one Copilot agent run); `--on-pom-change ''` removes it |
+
+### Settings: repository variables, no recompile
+*Settings › Secrets and variables › Actions › Variables* (setup.sh writes them; a manual run can
+override the first three):
+
+| Variable | Default | Effect |
+|---|---|---|
+| `WIZ_AUTO_PR` | `true` | `false` = issue only, no automated PR |
+| `WIZ_AUTO_PR_MAX_BUMP` | `major` | highest bump applied automatically (`patch`, `minor`, `major`); bigger ones go to Copilot |
+| `WIZ_MIN_SEVERITY` | `LOW` | hide CVEs below this level (`MEDIUM`, `HIGH`, `CRITICAL`); CISA-KEV and unknown severity are always listed |
+| `WIZ_MAVEN_DIR` | `.` | directory of the root `pom.xml`, relative to the repository root |
+| `WIZ_ISSUE_LABEL` | `wiz-sca` | label of the tracking issue (and of the PR) |
+
+### Advanced (edit the workflow)
 | What | Where |
 |---|---|
-| Interval | `on.schedule: every 6h` (`daily`, `every 12h`, or cron); recompile after frontmatter edits |
-| Maven project directory | top-level `env: MAVEN_DIR` (relative to the repository root; fix commands then start with `cd <dir>`) |
-| Model | `engine.model` and `safe-outputs.threat-detection.engine.model` |
-| Issue label | `--label wiz-sca` on `wizconnector publish` |
+| Model | `engine.model` and `safe-outputs.threat-detection.engine.model` (recompile) |
 | Cloud-agent flow | `publish --on-change replace --assignee @copilot` and a `COPILOT_ASSIGN_TOKEN` secret (user PAT; `GITHUB_TOKEN` cannot assign Copilot) passed as env to the publish step. `replace` closes the old issue and opens a new one when findings change, because the cloud agent ignores edits made after assignment |
 | Keep the issue open when clean | `publish --keep-open` |
 | Issues created by a custom token | `publish --trusted-author <login>` (default: the GitHub Actions bot) |
@@ -189,6 +228,7 @@ python -m wizconnector deps   --tree /tmp/tree.json --repo-root . --out /tmp/dir
 python -m wizconnector report --deps /tmp/direct-deps.json --findings findings.json --out-dir /tmp/out
 python -m wizconnector publish --repo owner/name --out-dir /tmp/out --dry-run
 python tests/validate_workflow.py main_workflow_schema.json workflows/*.md shared/mcp/*.md
+bash scripts/setup.sh --help                 # setup / doctor for a target repository
 bash tests/e2e_test_repo.sh                  # live end-to-end on test-repo/
 ```
 The findings format is [schemas/wiz-findings.schema.json](schemas/wiz-findings.schema.json).

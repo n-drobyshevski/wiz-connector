@@ -125,7 +125,7 @@ def cmd_deps(a) -> None:
 def cmd_report(a) -> None:
     inv = _inventory(a)
     records, doc = _load_findings(a.findings, a.agent_output)
-    res = fnd.evaluate(records, inv)
+    res = fnd.evaluate(records, inv, a.min_severity)
     if records and res.rejected == len(records):
         sys.exit(f"error: all {len(records)} findings were rejected as malformed; refusing to publish")
     if not records and not _scope_known(doc):
@@ -238,6 +238,9 @@ def main(argv=None) -> None:
     r.add_argument("--title-prefix", default="[wiz-sca]")
     r.add_argument("--verify-cmd", default="mvn -B -ntp verify")
     r.add_argument("--apply-result", default=None, help="apply-result.json from `apply` (adds PR status)")
+    r.add_argument("--min-severity", default="LOW", type=str.upper,
+                   choices=["LOW", "MEDIUM", "HIGH", "CRITICAL"],
+                   help="hide CVEs below this severity (CISA-KEV and UNKNOWN are always kept)")
     r.set_defaults(fn=cmd_report)
 
     ap_ = sub.add_parser("apply", help="run the safe fix commands, re-check versions, run the build")

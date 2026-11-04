@@ -64,6 +64,18 @@ class TestRepoGolden(unittest.TestCase):
         self.assertNotIn("com.example.wizdemo:api", ups)
         self.assertNotIn("org.springframework:spring-web", ups)
 
+    def test_min_severity_filter_keeps_kev(self):
+        doc = json.loads((REPO / "wiz-findings.sample.json").read_text())
+        res = fnd.evaluate(doc["findings"], inventory(), "HIGH")
+        ups = {u.ga: u for u in res.upgrades}
+        log4j = ups["org.apache.logging.log4j:log4j-core"]
+        self.assertEqual(sorted(f.cve for f in log4j.cves), ["CVE-2021-44228", "CVE-2021-45046"])   # KEV kept
+        self.assertEqual(log4j.target, "2.16.0")              # MEDIUM CVEs hidden -> lower target
+        self.assertEqual(res.below_threshold["org.apache.logging.log4j:log4j-core"], ["CVE-2021-44832", "CVE-2021-45105"])
+        body = render.body(res, "r", None, "t", None)
+        self.assertIn("Below the minimum severity", body)
+        self.assertIn("/wiz-scan", body)
+
     def test_fix_commands_and_body(self):
         cmds = render.fix_commands(self.result.upgrades)
         want = self.expected["fix_commands"]

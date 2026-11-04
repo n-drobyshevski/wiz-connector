@@ -35,9 +35,8 @@ cat <<EOF
 Next steps:
   cd $DEST
   gh repo create <owner>/wiz-demo-app --private --source . --push
-  gh aw compile --validate --strict          # writes .github/workflows/wiz-maven-vulns.lock.yml
-  git add .github && git commit -m "Compile wiz-maven-vulns" && git push
-  # secrets: WIZ_CLIENT_ID, WIZ_CLIENT_SECRET, WIZ_DATACENTER (+ COPILOT_GITHUB_TOKEN without org billing)
+  bash $SRC/scripts/setup.sh --local --commit && git push   # schedule, compile, variables, secrets
   # Wiz: include the new repository in your Wiz Code GitHub connector and wait for the first scan
-  gh workflow run wiz-maven-vulns.lock.yml -f staged=true   # dry run, issue rendered in the job summary
+  gh workflow run wiz-maven-vulns.lock.yml -f staged=true   # dry run, issue + PR rendered in the summary
+  bash $SRC/scripts/setup.sh --doctor
 EOF

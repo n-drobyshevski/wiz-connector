@@ -181,6 +181,8 @@ class Result:
     total_findings: int
     rejected: int = 0                           # malformed records dropped by validation
     maven_dir: str = "."
+    below_threshold: dict[str, list[str]] = field(default_factory=dict)   # ga -> CVEs under --min-severity
+    min_severity: str = "LOW"
 
 
 def _match_direct(f: Finding, inv: Inventory) -> str | None:
@@ -201,7 +203,10 @@ def _match_transitive(f: Finding, inv: Inventory) -> str | None:
     return None
 
 
-def evaluate(raw_findings: list[dict], inv: Inventory) -> Result:
+def evaluate(raw_findings: list[dict], inv: Inventory, min_severity: str = "LOW") -> Result:
+    """min_severity hides direct-dependency CVEs below that level; CISA-KEV and UNKNOWN are always kept."""
+    floor = SEVERITY_RANK.get(str(min_severity).upper(), 1)
+    below: dict[str, set] = {}
     by_direct: dict[str, dict[str, Finding]] = {}
     skipped: dict[str, set] = {}
     unmatched: dict[str, set] = {}
@@ -213,6 +218,9 @@ def evaluate(raw_findings: list[dict], inv: Inventory) -> Result:
             continue
         total += 1
         g = _match_direct(f, inv)
+        if g and not f.cisa_kev and f.severity != "UNKNOWN" and SEVERITY_RANK.get(f.severity, 0) < floor:
+            below.setdefault(g, set()).add(f.cve)
+            continue
         if g:
             # same CVE reported for several modules/paths: merge fixed versions
             prev = by_direct.setdefault(g, {}).get(f.cve)
@@ -283,6 +291,8 @@ def evaluate(raw_findings: list[dict], inv: Inventory) -> Result:
         total_findings=total,
         rejected=rejected,
         maven_dir=inv.maven_dir,
+        below_threshold={k: sorted(v) for k, v in sorted(below.items())},
+        min_severity=str(min_severity).upper(),
     )
 
 
