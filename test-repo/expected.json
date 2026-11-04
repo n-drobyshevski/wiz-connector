@@ -1,0 +1,123 @@
+{
+ "_comment": "Golden expectations for test-repo + wiz-findings.sample.json (checked by tests/test_test_repo.py and CI).",
+ "upgrades": [
+  {
+   "ga": "org.apache.logging.log4j:log4j-core",
+   "current": "2.14.1",
+   "target": "2.17.1",
+   "bump": "minor",
+   "severity": "CRITICAL",
+   "kev": true,
+   "cves": [
+    "CVE-2021-44228",
+    "CVE-2021-44832",
+    "CVE-2021-45046",
+    "CVE-2021-45105"
+   ],
+   "edit_kinds": [
+    "literal"
+   ]
+  },
+  {
+   "ga": "org.apache.commons:commons-text",
+   "current": "1.9",
+   "target": "1.10.0",
+   "bump": "minor",
+   "severity": "CRITICAL",
+   "kev": false,
+   "cves": [
+    "CVE-2022-42889"
+   ],
+   "edit_kinds": [
+    "property"
+   ]
+  },
+  {
+   "ga": "org.yaml:snakeyaml",
+   "current": "1.29",
+   "target": "2.0",
+   "bump": "major",
+   "severity": "CRITICAL",
+   "kev": false,
+   "cves": [
+    "CVE-2022-1471",
+    "CVE-2022-25857",
+    "CVE-2022-38749",
+    "CVE-2022-38752",
+    "CVE-2022-41854"
+   ],
+   "edit_kinds": [
+    "external-property"
+   ]
+  },
+  {
+   "ga": "com.h2database:h2",
+   "current": "1.4.200",
+   "target": "2.1.210",
+   "bump": "major",
+   "severity": "CRITICAL",
+   "kev": false,
+   "cves": [
+    "CVE-2021-42392",
+    "CVE-2022-23221"
+   ],
+   "edit_kinds": [
+    "literal"
+   ]
+  },
+  {
+   "ga": "com.fasterxml.jackson.core:jackson-databind",
+   "current": "2.13.2.2",
+   "target": "2.13.4.2",
+   "bump": "patch",
+   "severity": "HIGH",
+   "kev": false,
+   "cves": [
+    "CVE-2022-42003",
+    "CVE-2022-42004"
+   ],
+   "edit_kinds": [
+    "managed-external"
+   ]
+  },
+  {
+   "ga": "com.google.guava:guava",
+   "current": "30.1-jre",
+   "target": "32.0.0-jre",
+   "bump": "major",
+   "severity": "HIGH",
+   "kev": false,
+   "cves": [
+    "CVE-2020-8908",
+    "CVE-2023-2976"
+   ],
+   "edit_kinds": [
+    "literal"
+   ]
+  }
+ ],
+ "excluded": {
+  "transitive": [
+   "ch.qos.logback:logback-classic",
+   "org.apache.tomcat.embed:tomcat-embed-core",
+   "org.springframework:spring-web"
+  ],
+  "already_fixed": {
+   "com.fasterxml.jackson.core:jackson-databind": [
+    "CVE-2020-36518"
+   ]
+  },
+  "not_in_maven_tree": [
+   "lodash"
+  ],
+  "rejected_records": 1
+ },
+ "fix_commands": {
+  "use-dep-version": 3,
+  "set-property": 1,
+  "edit_by_hand": 2
+ },
+ "after_fix": {
+  "upgrades": 0
+ }
+}

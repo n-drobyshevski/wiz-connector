@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  wiz-connector test repository: a small multi-module app with DELIBERATELY vulnerable dependencies.
+  Do not deploy. Each declaration exercises one branch of wiz-connector (see README.md).
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <!-- external parent: manages jackson, snakeyaml, junit, ... outside this repository -->
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>2.6.6</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.example.wizdemo</groupId>
+  <artifactId>wiz-demo-parent</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <modules>
+    <module>api</module>
+    <module>service</module>
+    <module>batch</module>
+  </modules>
+
+  <properties>
+    <java.version>17</java.version>
+    <!-- in-repo property (api uses it; batch overrides it) -->
+    <commons-text.version>1.9</commons-text.version>
+  </properties>
+</project>

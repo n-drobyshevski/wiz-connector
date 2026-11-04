@@ -40,6 +40,22 @@ jobs:
           test "$(jq '.upgrades | length' "$out/report/report.json")" -eq 4
           cat "$out/report/issue-body.md" >> "$GITHUB_STEP_SUMMARY"
 
+  test-repo-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: test-repo/**/pom.xml
+      - name: Resolve, render, apply fix commands, verify, re-report (test-repo)
+        run: bash tests/e2e_test_repo.sh "$RUNNER_TEMP/e2e"
+
   validate-workflow:
     runs-on: ubuntu-latest
     steps:

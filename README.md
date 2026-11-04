@@ -142,6 +142,15 @@ Also set the org-wide Copilot model policy (it covers Copilot in VS Code too), a
   before running any command.
 - Wiz credentials live only in `mcp-servers.wiz.headers` (never in `env:`).
 
+## Test repository
+[`test-repo/`](test-repo) is a deliberately vulnerable multi-module Spring Boot app in which every
+dependency exercises one branch: literal, property with a child override, external-parent property,
+BOM-managed, test scope, `-jre` flavour, transitive-only and sibling module. It comes with
+Wiz-shaped sample findings and golden expectations. CI resolves it live, renders the issue, runs
+the issue's fix commands plus the "edit by hand" changes, runs `mvn verify`, and checks that nothing
+is left. `scripts/make-test-repo.sh <dir>` exports it as a standalone repository with the workflow
+and Copilot files installed, to try the real pipeline against Wiz.
+
 ## Local development
 ```bash
 python -m unittest discover -s tests -v
@@ -151,6 +160,7 @@ python -m wizconnector deps   --tree /tmp/tree.json --repo-root . --out /tmp/dir
 python -m wizconnector report --deps /tmp/direct-deps.json --findings findings.json --out-dir /tmp/out
 python -m wizconnector publish --repo owner/name --out-dir /tmp/out --dry-run
 python tests/validate_workflow.py main_workflow_schema.json workflows/*.md shared/mcp/*.md
+bash tests/e2e_test_repo.sh                  # live end-to-end on test-repo/
 ```
 The findings format is [schemas/wiz-findings.schema.json](schemas/wiz-findings.schema.json).
 `shared/mcp/wiz.md` is a reusable Wiz MCP import for other gh-aw workflows.
