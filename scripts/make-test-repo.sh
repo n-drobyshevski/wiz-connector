@@ -14,7 +14,7 @@ mkdir -p "$DEST"
 
 # the app (golden expectations stay in wiz-connector; the sample findings are useful for dry runs)
 tar -C "$SRC/test-repo" --exclude=target --exclude=expected.json -cf - . | tar -C "$DEST" -xf -
-# the scheduled workflow (equivalent to `gh aw add n-drobyshevski/wiz-connector/wiz-maven-vulns@v1`)
+# the scheduled workflow (equivalent to `gh aw add <owner>/wiz-connector/wiz-maven-vulns@v1`)
 mkdir -p "$DEST/.github/workflows"
 cp "$SRC/workflows/wiz-maven-vulns.md" "$DEST/.github/workflows/"
 # Copilot consumer files

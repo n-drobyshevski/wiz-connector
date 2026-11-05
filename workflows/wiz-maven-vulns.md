@@ -41,7 +41,7 @@ permissions:
 
 engine:
   id: copilot
-  # Pin a non-Anthropic model: the default "auto" lets the Copilot gateway pick any model.
+  # Pin the model: the default "auto" lets the Copilot gateway pick any model family.
   model: gpt-5.4
   mcp:
     tool-timeout: 3m          # Wiz allows 2-minute queries; the gateway default is 60s
@@ -120,7 +120,7 @@ safe-outputs:
   threat-detection:
     engine:
       id: copilot
-      model: gpt-5.4          # detection would otherwise try a small Claude model first
+      model: gpt-5.4          # detection's default alias may pick another model family
   jobs:
     publish-wiz-report:
       description: >-

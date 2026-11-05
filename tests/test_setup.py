@@ -41,7 +41,7 @@ if a[:2] == ["secret", "set"]:
     s = load("secrets.json", []); s.append(a[2]); (state / "secrets.json").write_text(json.dumps(sorted(set(s)))); sys.exit(0)
 if a[:2] == ["secret", "list"]:
     print(json.dumps([{"name": n} for n in load("secrets.json", [])])); sys.exit(0)
-if a[0] == "api" and a[1].endswith("/wiz-connector"):
+if a[0] == "api" and a[1].startswith("repos/") and a[1].count("/") == 2 and "-q" in a:
     print(os.environ.get("STUB_PRIVATE", "false")); sys.exit(0)
 if a[0] == "api" and "-X" not in a:
     print(json.dumps(load("perm.json", {"default_workflow_permissions": "write", "can_approve_pull_request_reviews": False}))); sys.exit(0)
@@ -149,6 +149,15 @@ class SetupTests(unittest.TestCase):
         d = self.run_setup("--doctor", extra_env={"STUB_PRIVATE": "true"})
         self.assertEqual(d.returncode, 1)
         self.assertIn("WIZ_CONNECTOR_TOKEN is missing", d.stdout)
+
+    def test_connector_repo_moved_to_org(self):
+        r = self.run_setup("--yes", "--local", "--connector-repo", "acme-org/wiz-connector",
+                           "--no-copilot-files", "--skip-wiz-check")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        md = (self.repo / ".github/workflows/wiz-maven-vulns.md").read_text()
+        self.assertEqual(md.count("repository: acme-org/wiz-connector"), 2)
+        self.assertNotIn("n-drobyshevski", md)
+        self.assertIn("(acme-org/wiz-connector)", r.stdout)
 
     def test_bad_input_is_rejected(self):
         r = self.run_setup("--yes", "--local", "--schedule", "every 6h; rm -rf /")

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/n-drobyshevski/wiz-connector/schemas/wiz-findings.schema.json",
+  "$id": "urn:wiz-connector:schemas:wiz-findings",
   "title": "Wiz findings handed from the agent to wiz-connector",
   "type": "object",
   "required": ["findings"],

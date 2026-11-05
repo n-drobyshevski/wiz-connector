@@ -120,13 +120,13 @@ Details and sources: [docs/wiz-mcp.md](docs/wiz-mcp.md).
 |---|---|
 | `WIZ_CLIENT_ID`, `WIZ_CLIENT_SECRET`, `WIZ_DATACENTER` | from step 1 |
 | `COPILOT_GITHUB_TOKEN` | only without org-billed Copilot CLI (e.g. a personal account): fine-grained PAT of a Copilot-licensed user, *Account › Copilot Requests: Read*. `setup.sh --copilot-auth pat` removes `copilot-requests: write` and stores it |
-| `WIZ_CONNECTOR_TOKEN` | needed while wiz-connector is private: fine-grained PAT with *Contents: Read* on `n-drobyshevski/wiz-connector`; setup.sh asks for it when it detects a private repo |
+| `WIZ_CONNECTOR_TOKEN` | needed while wiz-connector is private: fine-grained PAT with *Contents: Read* on this repository; setup.sh asks for it when it detects a private repo |
 | `WIZ_PR_TOKEN` | optional: token used to push the bump branch and open the PR, so CI runs on it |
 
 ### 3. Workflow
 ```bash
 gh extension install github/gh-aw                       # v1.0.1+
-gh aw add n-drobyshevski/wiz-connector/wiz-maven-vulns@v1
+gh aw add <owner>/wiz-connector/wiz-maven-vulns@v1          # <owner>: where this repository lives
 gh aw compile --validate --strict
 git add .github/workflows/wiz-maven-vulns.md .github/workflows/wiz-maven-vulns.lock.yml .github/aw/actions-lock.json
 git commit -m "Add Wiz direct-dependency tracker" && git push
@@ -182,16 +182,17 @@ override the first three):
 | Keep the issue open when clean | `publish --keep-open` |
 | Issues created by a custom token | `publish --trusted-author <login>` (default: the GitHub Actions bot) |
 
-### Keeping Anthropic models out
-No Claude model is configured anywhere:
-- `engine.model` is pinned (the default `auto` lets the Copilot gateway choose any model, Claude included);
+### Model policy
+Only the pinned GPT model is used:
+- `engine.model` is pinned (the default `auto` lets the Copilot gateway choose any model family);
 - `models.allowed: ["gpt-*"]` is enforced by the agent job's API proxy;
-- the threat-detection job (whose default alias tries a small Claude model first) is pinned to the
-  same GPT model; with the Copilot provider an unavailable model fails the run instead of being
+- the threat-detection job (whose default alias may pick another model family) is pinned to the
+  same model; with the Copilot provider an unavailable model fails the run instead of being
   substituted. The `models.allowed` policy itself is not applied to the detection job; to enforce
   it there too, compile with `GHAW_POLICY_MODELS_ALLOWED='gpt-*'`.
-Also set the org-wide Copilot model policy (it covers Copilot in VS Code too), avoid
-`.github/agents/*.agent.md` files naming Claude models, and check runs with `gh aw audit <run-url> --models`.
+Also set the org-wide Copilot model policy (it covers Copilot in VS Code too), keep
+`.github/agents/*.agent.md` files free of other `model:` choices, and check runs with
+`gh aw audit <run-url> --models`.
 
 ## Safety model
 - The agent job is read-only and firewalled; only the `publish-wiz-report` job has write

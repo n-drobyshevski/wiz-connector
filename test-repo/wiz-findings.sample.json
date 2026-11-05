@@ -1,7 +1,7 @@
 {
  "_comment": "Synthetic Wiz-shaped findings for the wiz-connector test repository. CVE ids, versions and fixed versions are real; ids, urls and scores are illustrative. Not produced by a Wiz tenant.",
  "wiz_scope": {
-  "resource_name": "n-drobyshevski/wiz-demo-app",
+  "resource_name": "acme/wiz-demo-app",
   "resource_id": "demo-repository-branch",
   "branch": "main",
   "tool_calls": 3,

@@ -31,6 +31,7 @@ WORKFLOW = "wiz-maven-vulns"
 WF_MD = Path(".github/workflows") / f"{WORKFLOW}.md"
 WF_LOCK = Path(".github/workflows") / f"{WORKFLOW}.lock.yml"
 SECRETS = ("WIZ_CLIENT_ID", "WIZ_CLIENT_SECRET", "WIZ_DATACENTER")
+DEFAULT_CONNECTOR = "n-drobyshevski/wiz-connector"   # where the scripts live unless detected otherwise
 _CRON = re.compile(r"^(\S+\s+){4}\S+$")
 _TZ = re.compile(r"^[A-Za-z]+(?:/[A-Za-z0-9_+\-]+){1,2}$|^UTC$")
 _FUZZY = re.compile(r"^[a-z0-9:\- ]{3,80}$")
@@ -129,8 +130,32 @@ def set_copilot_pat(text: str) -> str:
     return "\n".join(out) + body
 
 
-def connector_is_private() -> bool | None:
-    r = gh("api", "repos/n-drobyshevski/wiz-connector", "-q", ".private")
+_SLUG = re.compile(r"^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$")
+
+
+def connector_slug(override: str | None = None) -> str:
+    """owner/name of the wiz-connector repository: --connector-repo, else this clone's origin."""
+    if override:
+        if not _SLUG.match(override):
+            raise ValueError(f"--connector-repo must be owner/name: {override!r}")
+        return override
+    url = sh("git", "-C", str(SRC), "remote", "get-url", "origin").stdout.strip()
+    m = re.search(r"github\.com[:/]+([A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+?)(?:\.git)?/?$", url)
+    return m.group(1) if m else DEFAULT_CONNECTOR
+
+
+def set_connector_repo(text: str, slug: str) -> str:
+    """Point both checkouts of the scripts (the `repository:` right above `path: .wiz-connector`) at slug."""
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("- repository:") or ln.lstrip().startswith("repository:"):
+            if any("path: .wiz-connector" in x for x in lines[i + 1:i + 4]):
+                lines[i] = ln[: ln.index("repository:")] + f"repository: {slug}"
+    return "\n".join(lines)
+
+
+def connector_is_private(slug: str) -> bool | None:
+    r = gh("api", f"repos/{slug}", "-q", ".private")
     return None if r.returncode else r.stdout.strip() == "true"
 
 
@@ -201,7 +226,8 @@ def cmd_setup(a) -> int:
     if gh("aw", "version").returncode:
         sys.exit("error: gh-aw is missing: run `gh extension install github/gh-aw`")
     repo = _repo_slug(a.repo)
-    say(f"Setting up wiz-connector in {repo}")
+    slug = connector_slug(a.connector_repo)
+    say(f"Setting up wiz-connector ({slug}) in {repo}")
 
     maven_dir = ask("Maven project directory (where the root pom.xml is)", a.maven_dir, a.yes)
     if not (root / maven_dir / "pom.xml").is_file():
@@ -215,7 +241,7 @@ def cmd_setup(a) -> int:
             shutil.copyfile(SRC / "workflows" / f"{WORKFLOW}.md", md)
             say(f"{OK} copied {WF_MD} from {SRC}")
         else:
-            r = gh("aw", "add", f"n-drobyshevski/wiz-connector/{WORKFLOW}@{a.ref}")
+            r = gh("aw", "add", f"{slug}/{WORKFLOW}@{a.ref}")
             if r.returncode or not md.exists():
                 sys.exit(f"error: gh aw add failed: {r.stderr.strip()[:300]} (retry with --local)")
             say(f"{OK} installed {WF_MD} via gh aw add (@{a.ref})")
@@ -232,6 +258,7 @@ def cmd_setup(a) -> int:
         text = set_pom_trigger(text, a.on_pom_change or None)
     if a.copilot_auth == "pat":
         text = set_copilot_pat(text)
+    text = set_connector_repo(text, slug)
     md.write_text(text, encoding="utf-8")
     say(f"{OK} schedule: {read_schedule(text)}" + (f"; also on pom.xml pushes to {a.on_pom_change}" if a.on_pom_change else ""))
     if a.copilot_auth == "pat":
@@ -280,8 +307,8 @@ def cmd_setup(a) -> int:
     optional = []
     if a.copilot_auth == "pat":
         optional.append(("COPILOT_GITHUB_TOKEN", "fine-grained PAT of a Copilot user, Account > Copilot Requests: Read", True))
-    if connector_is_private():
-        optional.append(("WIZ_CONNECTOR_TOKEN", "fine-grained PAT, Contents: read on n-drobyshevski/wiz-connector", True))
+    if connector_is_private(slug):
+        optional.append(("WIZ_CONNECTOR_TOKEN", f"fine-grained PAT, Contents: read on {slug}", True))
     if a.auto_pr == "true":
         optional.append(("WIZ_PR_TOKEN", "optional: PAT so CI runs on the bump PR (Enter to skip)", False))
     for name, why, required in optional:
@@ -359,8 +386,9 @@ def cmd_doctor(a) -> int:
     names = {s["name"] for s in json.loads(sec.stdout or "[]")} if not sec.returncode else set()
     for name in SECRETS:
         check(name in names, f"secret {name} set", f"secret {name} missing: `gh secret set {name} --repo {repo}`")
-    if connector_is_private():
-        check("WIZ_CONNECTOR_TOKEN" in names, "secret WIZ_CONNECTOR_TOKEN set (wiz-connector is private)",
+    slug = connector_slug(a.connector_repo)
+    if connector_is_private(slug):
+        check("WIZ_CONNECTOR_TOKEN" in names, f"secret WIZ_CONNECTOR_TOKEN set ({slug} is private)",
               "wiz-connector is private but WIZ_CONNECTOR_TOKEN is missing: the checkout of the scripts will fail")
     check("copilot-requests: write" in text or "COPILOT_GITHUB_TOKEN" in names,
           "Copilot engine auth (org billing or COPILOT_GITHUB_TOKEN)",
@@ -396,6 +424,7 @@ def main(argv=None) -> int:
     ap.add_argument("--doctor", action="store_true", help="only check the setup")
     ap.add_argument("--repo", help="owner/name (default: the current clone's GitHub repo)")
     ap.add_argument("--ref", default="v1", help="wiz-connector version to install (gh aw add)")
+    ap.add_argument("--connector-repo", help="owner/name of wiz-connector (default: this clone's origin remote)")
     ap.add_argument("--local", action="store_true", help="copy the workflow from this checkout instead of gh aw add")
     when = ap.add_mutually_exclusive_group()
     when.add_argument("--schedule", help="gh-aw schedule: 'every 6h', 'daily around 9am on weekdays', 'weekly on monday'")

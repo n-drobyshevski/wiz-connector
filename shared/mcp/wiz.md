@@ -1,7 +1,7 @@
 ---
 # Reusable Wiz MCP definition for any gh-aw workflow:
 #   imports:
-#     - n-drobyshevski/wiz-connector/shared/mcp/wiz.md@v1
+#     - <owner>/wiz-connector/shared/mcp/wiz.md@v1
 # Secrets: WIZ_CLIENT_ID, WIZ_CLIENT_SECRET, WIZ_DATACENTER (a read-only "Wiz MCP Integration").
 mcp-servers:
   wiz:

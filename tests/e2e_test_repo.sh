@@ -21,7 +21,7 @@ echo "::endgroup::"
 
 echo "::group::2. render issue"
 python3 -m wizconnector report --deps "$WORK/before/direct-deps.json" --findings "$FINDINGS" \
-  --maven-version-file "$WORK/before/maven-version.txt" --repo n-drobyshevski/wiz-demo-app \
+  --maven-version-file "$WORK/before/maven-version.txt" --repo acme/wiz-demo-app \
   --out-dir "$WORK/report"
 echo "::endgroup::"
 

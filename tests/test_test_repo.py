@@ -82,7 +82,7 @@ class TestRepoGolden(unittest.TestCase):
         self.assertEqual(sum(":use-dep-version " in c for c in cmds), want["use-dep-version"])
         self.assertEqual(sum(":set-property " in c for c in cmds), want["set-property"])
         self.assertEqual(sum("edit by hand" in c for c in cmds), want["edit_by_hand"])
-        body = render.body(self.result, "n-drobyshevski/wiz-demo-app", "main", "t", None)
+        body = render.body(self.result, "acme/wiz-demo-app", "main", "t", None)
         self.assertNotIn("evil.example", body)
         self.assertNotIn("$(id)", body)
         self.assertLess(len(body), 12_000)
