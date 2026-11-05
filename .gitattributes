@@ -1,0 +1,3 @@
+# Keep LF everywhere so bash scripts run in Git Bash / WSL even with core.autocrlf=true on Windows.
+* text=auto eol=lf
+*.sh text eol=lf
