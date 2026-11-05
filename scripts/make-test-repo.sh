@@ -15,13 +15,17 @@ mkdir -p "$DEST"
 # the app (golden expectations stay in wiz-connector; the sample findings are useful for dry runs)
 cp -R "$SRC/test-repo/." "$DEST/"
 rm -rf "$DEST/expected.json" "$DEST/target" "$DEST"/*/target
-# the scheduled workflow (equivalent to `gh aw add <owner>/wiz-connector/wiz-maven-vulns@v1`)
+# the scheduled workflow (equivalent to `gh aw add n-drobyshevski/wiz-connector/wiz-maven-vulns@v1`)
 mkdir -p "$DEST/.github/workflows"
 cp "$SRC/workflows/wiz-maven-vulns.md" "$DEST/.github/workflows/"
 # Copilot consumer files
 cp -r "$SRC/copilot/.github/." "$DEST/.github/"
 cp "$SRC/copilot/.mcp.json" "$DEST/.mcp.json"
 printf 'target/\n.idea/\n*.iml\n' > "$DEST/.gitignore"
+
+# owner of the wiz-connector clone, used in the hints below
+OWNER="$(git -C "$SRC" remote get-url origin 2>/dev/null | sed -E 's#.*github\.com[:/]+([^/]+)/.*#\1#')"
+OWNER="${OWNER:-YOUR_ORG}"
 
 cd "$DEST"
 git init -q -b main
@@ -35,7 +39,7 @@ cat <<EOF
 
 Next steps:
   cd $DEST
-  gh repo create <owner>/wiz-demo-app --private --source . --push
+  gh repo create $OWNER/wiz-demo-app --private --source . --push
   bash $SRC/scripts/setup.sh --local --commit && git push   # schedule, compile, variables, secrets
   # Wiz: include the new repository in your Wiz Code GitHub connector and wait for the first scan
   gh workflow run wiz-maven-vulns.lock.yml -f staged=true   # dry run, issue + PR rendered in the summary

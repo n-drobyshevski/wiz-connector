@@ -126,7 +126,7 @@ Details and sources: [docs/wiz-mcp.md](docs/wiz-mcp.md).
 ### 3. Workflow
 ```bash
 gh extension install github/gh-aw                       # v1.0.1+
-gh aw add <owner>/wiz-connector/wiz-maven-vulns@v1          # <owner>: where this repository lives
+gh aw add n-drobyshevski/wiz-connector/wiz-maven-vulns@v1
 gh aw compile --validate --strict
 git add .github/workflows/wiz-maven-vulns.md .github/workflows/wiz-maven-vulns.lock.yml .github/aw/actions-lock.json
 git commit -m "Add Wiz direct-dependency tracker" && git push
