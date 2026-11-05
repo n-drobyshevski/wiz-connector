@@ -151,13 +151,13 @@ class SetupTests(unittest.TestCase):
         self.assertIn("WIZ_CONNECTOR_TOKEN is missing", d.stdout)
 
     def test_connector_repo_moved_to_org(self):
-        r = self.run_setup("--yes", "--local", "--connector-repo", "acme-org/wiz-connector",
+        r = self.run_setup("--yes", "--local", "--connector-repo", "other-org/wiz-connector-copy",
                            "--no-copilot-files", "--skip-wiz-check")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         md = (self.repo / ".github/workflows/wiz-maven-vulns.md").read_text()
-        self.assertEqual(md.count("repository: acme-org/wiz-connector"), 2)
-        self.assertNotIn("n-drobyshevski", md)
-        self.assertIn("(acme-org/wiz-connector)", r.stdout)
+        self.assertEqual(md.count("repository: other-org/wiz-connector-copy"), 2)
+        self.assertEqual(md.count("repository:"), 2)          # both checkouts moved, nothing else touched
+        self.assertIn("(other-org/wiz-connector-copy)", r.stdout)
 
     def test_bad_input_is_rejected(self):
         r = self.run_setup("--yes", "--local", "--schedule", "every 6h; rm -rf /")
