@@ -120,6 +120,20 @@ def set_pom_trigger(text: str, branch: str | None) -> str:
     return "\n".join(lines) + body
 
 
+def set_copilot_pat(text: str) -> str:
+    """Drop `copilot-requests: write` (org-billed inference) so the COPILOT_GITHUB_TOKEN secret is used."""
+    fm, body = _split(text)
+    out = [ln for ln in fm.split("\n") if ln.strip() != "copilot-requests: write"
+           and not ln.strip().startswith(("# Copilot inference billed", "# Personal account / no org billing",
+                                          "# and stores the COPILOT_GITHUB_TOKEN"))]
+    return "\n".join(out) + body
+
+
+def connector_is_private() -> bool | None:
+    r = gh("api", "repos/n-drobyshevski/wiz-connector", "-q", ".private")
+    return None if r.returncode else r.stdout.strip() == "true"
+
+
 def read_schedule(text: str) -> str:
     fm, _ = _split(text)
     lines = fm.split("\n")
@@ -216,8 +230,12 @@ def cmd_setup(a) -> int:
         text = set_schedule(text, schedule=sched)
     if a.on_pom_change is not None:
         text = set_pom_trigger(text, a.on_pom_change or None)
+    if a.copilot_auth == "pat":
+        text = set_copilot_pat(text)
     md.write_text(text, encoding="utf-8")
     say(f"{OK} schedule: {read_schedule(text)}" + (f"; also on pom.xml pushes to {a.on_pom_change}" if a.on_pom_change else ""))
+    if a.copilot_auth == "pat":
+        say(f"{OK} Copilot auth: COPILOT_GITHUB_TOKEN secret (org-billed `copilot-requests` removed)")
 
     # 3. compile
     if not a.no_compile:
@@ -258,6 +276,25 @@ def cmd_setup(a) -> int:
         say(f"{OK if good else BAD} Wiz MCP accepts these credentials: {detail}")
         if not good:
             sys.exit("error: Wiz rejected the credentials; secrets not saved")
+    # optional tokens: Copilot PAT (no org billing), wiz-connector checkout (private repo), PR token (CI on PR)
+    optional = []
+    if a.copilot_auth == "pat":
+        optional.append(("COPILOT_GITHUB_TOKEN", "fine-grained PAT of a Copilot user, Account > Copilot Requests: Read", True))
+    if connector_is_private():
+        optional.append(("WIZ_CONNECTOR_TOKEN", "fine-grained PAT, Contents: read on n-drobyshevski/wiz-connector", True))
+    if a.auto_pr == "true":
+        optional.append(("WIZ_PR_TOKEN", "optional: PAT so CI runs on the bump PR (Enter to skip)", False))
+    for name, why, required in optional:
+        if name in have and not a.rotate_secrets:
+            say(f"{OK} secret {name} already set")
+            continue
+        val = os.environ.get(name)
+        if not val and not a.yes and sys.stdin.isatty():
+            val = getpass.getpass(f"{name} ({why}): ").strip()
+        if val:
+            creds[name] = val
+        elif required:
+            say(f"{WARN}secret {name} missing ({why}): `gh secret set {name} --repo {repo}`")
     for name, val in creds.items():
         r = gh("secret", "set", name, "--repo", repo, input_text=val)
         say(f"{OK if not r.returncode else BAD} secret {name} saved")
@@ -322,6 +359,9 @@ def cmd_doctor(a) -> int:
     names = {s["name"] for s in json.loads(sec.stdout or "[]")} if not sec.returncode else set()
     for name in SECRETS:
         check(name in names, f"secret {name} set", f"secret {name} missing: `gh secret set {name} --repo {repo}`")
+    if connector_is_private():
+        check("WIZ_CONNECTOR_TOKEN" in names, "secret WIZ_CONNECTOR_TOKEN set (wiz-connector is private)",
+              "wiz-connector is private but WIZ_CONNECTOR_TOKEN is missing: the checkout of the scripts will fail")
     check("copilot-requests: write" in text or "COPILOT_GITHUB_TOKEN" in names,
           "Copilot engine auth (org billing or COPILOT_GITHUB_TOKEN)",
           "no Copilot auth: keep `copilot-requests: write` with org billing, or set COPILOT_GITHUB_TOKEN")
@@ -369,7 +409,10 @@ def main(argv=None) -> int:
     ap.add_argument("--min-severity", choices=["LOW", "MEDIUM", "HIGH", "CRITICAL"], default="LOW")
     ap.add_argument("--label", default="wiz-sca")
     ap.add_argument("--datacenter", help="Wiz data center, e.g. us17 (WIZ_DATACENTER)")
-    ap.add_argument("--rotate-secrets", action="store_true", help="ask for the Wiz secrets even if set")
+    ap.add_argument("--copilot-auth", choices=["org", "pat"], default="org",
+                    help="org: Copilot billed to the organization (copilot-requests: write); "
+                         "pat: personal account, uses the COPILOT_GITHUB_TOKEN secret")
+    ap.add_argument("--rotate-secrets", action="store_true", help="ask for the secrets even if set")
     ap.add_argument("--skip-wiz-check", action="store_true", help="do not test the credentials against Wiz")
     ap.add_argument("--no-compile", action="store_true")
     ap.add_argument("--no-copilot-files", action="store_true")

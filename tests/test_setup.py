@@ -41,6 +41,8 @@ if a[:2] == ["secret", "set"]:
     s = load("secrets.json", []); s.append(a[2]); (state / "secrets.json").write_text(json.dumps(sorted(set(s)))); sys.exit(0)
 if a[:2] == ["secret", "list"]:
     print(json.dumps([{"name": n} for n in load("secrets.json", [])])); sys.exit(0)
+if a[0] == "api" and a[1].endswith("/wiz-connector"):
+    print(os.environ.get("STUB_PRIVATE", "false")); sys.exit(0)
 if a[0] == "api" and "-X" not in a:
     print(json.dumps(load("perm.json", {"default_workflow_permissions": "write", "can_approve_pull_request_reviews": False}))); sys.exit(0)
 if a[0] == "api" and "-X" in a:
@@ -127,6 +129,26 @@ class SetupTests(unittest.TestCase):
         self.assertIn('    - cron: "30 7 * * 1-5"\n      timezone: "Europe/Paris"\n', md)
         self.assertFalse((self.repo / ".mcp.json").exists())
         self.assertFalse(any(c["args"][:2] == ["aw", "add"] for c in self.calls()))
+
+    def test_personal_account_and_private_connector(self):
+        r = self.run_setup("--yes", "--local", "--copilot-auth", "pat", "--skip-wiz-check", "--no-copilot-files",
+                           extra_env={"STUB_PRIVATE": "true", "COPILOT_GITHUB_TOKEN": "pat-copilot",
+                                      "WIZ_CONNECTOR_TOKEN": "pat-reader"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        md = (self.repo / ".github/workflows/wiz-maven-vulns.md").read_text()
+        self.assertNotIn("copilot-requests: write", md)
+        sets = {c["args"][2]: c["stdin"] for c in self.calls() if c["args"][:2] == ["secret", "set"]}
+        self.assertEqual((sets["COPILOT_GITHUB_TOKEN"], sets["WIZ_CONNECTOR_TOKEN"]), ("pat-copilot", "pat-reader"))
+        self.assertNotIn("WIZ_PR_TOKEN", sets)                     # optional and not provided
+        d = self.run_setup("--doctor", extra_env={"STUB_PRIVATE": "true"})
+        self.assertIn("WIZ_CONNECTOR_TOKEN set", d.stdout)
+        self.assertIn("Copilot engine auth", d.stdout)
+
+    def test_doctor_flags_private_connector_without_token(self):
+        self.run_setup("--yes", "--local", "--skip-wiz-check", "--no-copilot-files")
+        d = self.run_setup("--doctor", extra_env={"STUB_PRIVATE": "true"})
+        self.assertEqual(d.returncode, 1)
+        self.assertIn("WIZ_CONNECTOR_TOKEN is missing", d.stdout)
 
     def test_bad_input_is_rejected(self):
         r = self.run_setup("--yes", "--local", "--schedule", "every 6h; rm -rf /")

@@ -35,7 +35,8 @@ on:
 permissions:
   contents: read
   # Copilot inference billed to the org (needs "Copilot CLI billed to the organization").
-  # Without org billing: remove this line and set the COPILOT_GITHUB_TOKEN secret instead.
+  # Personal account / no org billing: `scripts/setup.sh --copilot-auth pat` removes this line
+  # and stores the COPILOT_GITHUB_TOKEN secret instead.
   copilot-requests: write
 
 engine:
@@ -71,6 +72,8 @@ checkout:
   - repository: n-drobyshevski/wiz-connector
     ref: v1                   # pin a commit SHA for stricter supply-chain control
     path: .wiz-connector
+    # needed while wiz-connector is private: a token that can read it (Contents: read)
+    github-token: ${{ secrets.WIZ_CONNECTOR_TOKEN || github.token }}
 
 network:
   allowed:
@@ -156,6 +159,7 @@ safe-outputs:
             repository: n-drobyshevski/wiz-connector
             ref: v1
             path: .wiz-connector
+            token: ${{ secrets.WIZ_CONNECTOR_TOKEN || github.token }}
             persist-credentials: false
         - name: Set up JDK
           uses: actions/setup-java@v6

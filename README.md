@@ -119,7 +119,8 @@ Details and sources: [docs/wiz-mcp.md](docs/wiz-mcp.md).
 | Secret | Value |
 |---|---|
 | `WIZ_CLIENT_ID`, `WIZ_CLIENT_SECRET`, `WIZ_DATACENTER` | from step 1 |
-| `COPILOT_GITHUB_TOKEN` | only without org-billed Copilot CLI: fine-grained PAT of a Copilot-licensed user, *Account › Copilot Requests: Read*; then remove `copilot-requests: write` from the workflow |
+| `COPILOT_GITHUB_TOKEN` | only without org-billed Copilot CLI (e.g. a personal account): fine-grained PAT of a Copilot-licensed user, *Account › Copilot Requests: Read*. `setup.sh --copilot-auth pat` removes `copilot-requests: write` and stores it |
+| `WIZ_CONNECTOR_TOKEN` | needed while wiz-connector is private: fine-grained PAT with *Contents: Read* on `n-drobyshevski/wiz-connector`; setup.sh asks for it when it detects a private repo |
 | `WIZ_PR_TOKEN` | optional: token used to push the bump branch and open the PR, so CI runs on it |
 
 ### 3. Workflow
@@ -132,8 +133,8 @@ git commit -m "Add Wiz direct-dependency tracker" && git push
 gh aw run wiz-maven-vulns          # first run: Actions › Run workflow with staged=true (dry run)
 ```
 Each run checks out this repository at `ref: v1` for the scripts (frontmatter `checkout:` and
-the publish job). Pin a commit SHA instead of the tag for stricter supply-chain control. If this
-repository is private, add a `github-token:` / `token:` that can read it to both checkouts.
+the publish job), using `WIZ_CONNECTOR_TOKEN` if set (required while this repository is private).
+Pin a commit SHA instead of the tag for stricter supply-chain control.
 
 ### 4. Copilot files
 Copy [`copilot/`](copilot) into the target repository:
